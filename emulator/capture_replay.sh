@@ -5,7 +5,7 @@
 #   ./emulator/capture_replay.sh <challenge_id> [game]
 #
 # Output (data/captures/<challenge_id>/):
-#   video.mkv      — 128×128 grayscale H.264, 60 fps
+#   video.avi      — 128×128 grayscale MJPEG, 60 fps
 #   audio.wav      — 8-bit mono 16 kHz PCM
 #   input_log.txt  — per-frame inputs + health from Lua
 
@@ -24,12 +24,11 @@ mkdir -p "$OUT_DIR"
 
 EMU_PID=""
 GST_PID=""
-FFMPEG_PID=""
+AUDIO_PID=""
 _cleanup() {
     echo ""
     echo "Cleaning up …"
     [ -n "${GST_PID:-}" ] && kill $GST_PID 2>/dev/null || true
-    [ -n "${FFMPEG_PID:-}" ] && kill $FFMPEG_PID 2>/dev/null || true
     [ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
@@ -82,35 +81,18 @@ AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
-    mkfifo /tmp/st_rnn_y4m 2>/dev/null || true
-
-    # gstreamer: capture → resize → gray → y4m → fifo
+    # pipewiresrc → videoconvertscale → 128×128 gray →
+    # jpegenc (MJPEG, quality 92) → avimux → file
+    # MJPEG: fast encode/decode, intra-frame, real-time on one thread
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
-        ! y4menc \
-        ! filesink location=/tmp/st_rnn_y4m \
+        ! jpegenc quality=92 \
+        ! avimux \
+        ! filesink location="$OUT_DIR/video.avi" \
         2>/tmp/st_rnn_gst_err &
     GST_PID=$!
-
-    # ffmpeg: read y4m from fifo → ffv1 → mkv
-    ffmpeg -y -v warning \
-        -f yuv4mpegpipe -i /tmp/st_rnn_y4m \
-        -c:v ffv1 -level 1 -pix_fmt gray \
-        -an \
-        "$OUT_DIR/video.mkv" \
-        2>/tmp/st_rnn_ffmpeg_err &
-    FFMPEG_PID=$!
-
-    VID_PID=$GST_PID
-    sleep 1
-    if ! kill -0 $GST_PID 2>/dev/null; then
-        echo "  ERROR: gstreamer died"
-        echo "  gst: $(head -c 300 /tmp/st_rnn_gst_err 2>/dev/null)"
-        VID_PID=""
-    fi
-fi
 
 # ---- Wait ----
 echo "Recording — press Ctrl+C when replay ends, or wait …"

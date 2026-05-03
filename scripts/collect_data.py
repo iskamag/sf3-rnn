@@ -2,7 +2,7 @@
 """Convert preprocessed captures into training .npz files.
 
 Each capture directory contains:
-  video.mkv      — 128×128 grayscale H.264, 60 fps
+  video.avi      — 128×128 grayscale MJPEG, 60 fps
   audio.wav      — 8-bit mono 16 kHz PCM
   input_log.txt  — "frame bits p1hp p2hp timer p1wins p2wins" per line
 
@@ -146,7 +146,7 @@ def main():
     total_matches = 0
 
     for d in tqdm(dirs, desc="Captures"):
-        video = d / "video.mkv"
+        video = d / "video.avi"
         audio = d / "audio.wav"
         log = d / "input_log.txt"
 
@@ -154,7 +154,7 @@ def main():
             tqdm.write(f"  [skip] {d.name}: no input_log.txt")
             continue
         if not video.exists():
-            tqdm.write(f"  [skip] {d.name}: no video.mkv")
+            tqdm.write(f"  [skip] {d.name}: no video.avi")
             continue
 
         # ---- inputs ----
