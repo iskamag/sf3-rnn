@@ -56,22 +56,23 @@ EMU_PID=$!
 sleep 5
 
 # ---- Find gamescope's own pipewire video source ----
-# Gamescope creates a Video/Source node named "gamescope" when running
-# nested.  No portal dialog needed.
 echo "[2/3] Finding gamescope pipewire node …"
 PWNODE=""
-for i in $(seq 1 15); do
+for i in $(seq 1 20); do
     PWNODE=$(pw-cli list-objects 2>/dev/null | awk '
-        /node.name = "gamescope"/ { innode=1; next }
-        innode && /^[[:space:]]*id [0-9]+, type.*Node/ {
-            gsub(/,/,""); print $2; exit
-        }')
+        /type PipeWire:Interface:Node/ { nid=$2; gsub(/,/,"",nid) }
+        /node.name/   { name=$0; gsub(/.*node.name = "/,"",name); gsub(/".*/,"",name) }
+        /media.class = "Video\/Source"/ { print nid, name >> "/dev/stderr"; print nid; exit }
+    ' 2>/tmp/st_rnn_pw_debug)
     [ -n "$PWNODE" ] && break
     sleep 1
 done
 
 if [ -z "$PWNODE" ]; then
-    echo "  ERROR: gamescope pipewire node not found"
+    echo "  Listing all video nodes:"
+    head -20 /tmp/st_rnn_pw_debug 2>/dev/null
+    pw-cli list-objects 2>/dev/null | grep -A2 "Video/Source" | head -20
+    echo "  ERROR: no Video/Source node found"
     exit 1
 fi
 echo "  node: $PWNODE"
