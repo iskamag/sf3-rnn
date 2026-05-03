@@ -11,3 +11,4 @@ logs/
 *.zip
 *.tar.gz
 master/
+fcreplay/
