@@ -62,7 +62,7 @@ for i in $(seq 1 20); do
     PWNODE=$(pw-cli list-objects 2>/dev/null | awk '
         /type PipeWire:Interface:Node/ { nid=$2; gsub(/,/,"",nid) }
         /node.name/   { name=$0; gsub(/.*node.name = "/,"",name); gsub(/".*/,"",name) }
-        /media.class = "Video\/Source"/ { print nid, name >> "/dev/stderr"; print nid; exit }
+        /media.class = "Video\/Source"/ && name == "gamescope" { print nid; exit }
     ' 2>/tmp/st_rnn_pw_debug)
     [ -n "$PWNODE" ] && break
     sleep 1
