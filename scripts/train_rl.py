@@ -21,11 +21,13 @@ from config import Config
 from model.rnn import SF3RNN
 from model.action_space import Direction, Button
 from model.reaction_buffer import ReactionBuffer
+from model.audio_buffer import AudioBuffer
 from model.output_buffer import OutputDelayBuffer
 from train.ppo import PPOTrainer
 from train.reward import compute_step_reward, RewardConfig
 from vision.game_state import extract_game_state, GameState
 from env.sf3_env import SF3Env, MssScreenEnv
+from env.audio_capture import AudioCapture, AudioCaptureStub
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +35,7 @@ def collect_episode(env: SF3Env,
                     model: SF3RNN,
                     trainer: PPOTrainer,
                     sensory_buf: ReactionBuffer,
+                    audio_buf: AudioBuffer,
                     motor_buf: OutputDelayBuffer,
                     cfg: Config,
                     max_steps: int = 3600,
@@ -64,9 +67,11 @@ def collect_episode(env: SF3Env,
             sensory_buf.add_frame(frame)
             continue
 
-        # ---- LSTM forward (sensory-delayed flow) ----
+        # ---- LSTM forward (sensory-delayed flow + audio) ----
+        audio_feats = audio_buf.get_features()
         with torch.no_grad():
-            actions, hidden = model.step(flow, model.hidden)
+            actions, hidden = model.step(flow, model.hidden,
+                                         audio_feats=audio_feats)
             model.hidden = hidden
 
         mov_dist = torch.distributions.Categorical(logits=actions["movement"])
@@ -110,13 +115,15 @@ def collect_episode(env: SF3Env,
 
         sensory_buf.add_frame(frame)
 
-        # ---- Log transition aligned to the decision's *total-delay* flow ----
+        # ---- Log transition ----
         decision_flow = sensory_buf.get_flow_at(cfg.total_delay_frames)
         if decision_flow is None:
-            decision_flow = flow    # fallback — shouldn't happen after warm-up
+            decision_flow = flow
+        af = audio_feats.squeeze(0) if audio_feats is not None \
+            else torch.zeros(cfg.audio_feat_dim)
 
         trainer.buffer.add(
-            decision_flow, delayed.movement, delayed.buttons,
+            decision_flow, af, delayed.movement, delayed.buttons,
             delayed.log_prob.to(device), delayed.value.to(device),
             reward, done,
         )
@@ -150,6 +157,19 @@ def main():
         device=str(device))
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
 
+    audio_buf = AudioBuffer(
+        audio_lag=cfg.audio_lag_frames,
+        sample_rate=cfg.audio_sample_rate,
+        feat_dim=cfg.audio_feat_dim,
+        device=str(device))
+    audio_cap: AudioCapture | AudioCaptureStub
+    if cfg.use_audio:
+        audio_cap = AudioCapture(callback=audio_buf.add_samples,
+                                 sample_rate=cfg.audio_sample_rate)
+    else:
+        audio_cap = AudioCaptureStub()
+    audio_cap.start()
+
     total_steps = 0
     episode = 0
     t0 = time.time()
@@ -157,7 +177,7 @@ def main():
     while total_steps < args.total_steps:
         ep_reward = collect_episode(
             env, trainer.model, trainer,
-            sensory_buf, motor_buf, cfg,
+            sensory_buf, audio_buf, motor_buf, cfg,
         )
 
         ep_len = len(trainer.buffer)
@@ -183,6 +203,7 @@ def main():
             trainer.save()
 
     trainer.save(tag="_final")
+    audio_cap.stop()
     env.close()
     print(f"Done — {(time.time() - t0)/3600:.1f} h")
 

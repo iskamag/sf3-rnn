@@ -24,9 +24,11 @@ from config import Config
 from model.rnn import SF3RNN
 from model.action_space import decode_action, Direction, Button
 from model.reaction_buffer import ReactionBuffer
+from model.audio_buffer import AudioBuffer
 from model.output_buffer import OutputDelayBuffer
 from vision.game_state import has_health_bar
 from env.sf3_env import MssScreenEnv
+from env.audio_capture import AudioCapture, AudioCaptureStub
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,7 @@ def _parse_buttons(names: tuple[str, ...]) -> list[Button]:
 # ---------------------------------------------------------------------------
 def navigate_menu(env: MssScreenEnv,
                   sensory_buf: ReactionBuffer,
+                  audio_buf: AudioBuffer,
                   motor_buf: OutputDelayBuffer,
                   cfg: Config,
                   roi: dict,
@@ -121,6 +124,7 @@ def main():
 
     model = SF3RNN(
         feature_dim=cfg.feature_dim,
+        audio_dim=cfg.audio_dim,
         lstm_hidden=cfg.lstm_hidden,
         lstm_layers=cfg.lstm_layers,
         lstm_dropout=cfg.lstm_dropout,
@@ -129,7 +133,7 @@ def main():
     ).to(device).eval()
 
     ckpt = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=False)
     print(f"Loaded checkpoint (step {ckpt.get('step', '?')})")
 
     env = MssScreenEnv(cfg)
@@ -140,6 +144,19 @@ def main():
         frame_size=cfg.frame_size, flow_norm=cfg.flow_norm,
         device=str(device))
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
+
+    audio_buf = AudioBuffer(
+        audio_lag=cfg.audio_lag_frames,
+        sample_rate=cfg.audio_sample_rate,
+        feat_dim=cfg.audio_feat_dim,
+        device=str(device))
+    audio_cap: AudioCapture | AudioCaptureStub
+    if cfg.use_audio:
+        audio_cap = AudioCapture(callback=audio_buf.add_samples,
+                                 sample_rate=cfg.audio_sample_rate)
+    else:
+        audio_cap = AudioCaptureStub()
+    audio_cap.start()
 
     sensory_buf.add_frame(frame)
     frame_ms = 1000.0 / args.fps
@@ -166,7 +183,7 @@ def main():
 
             if health_absent > cfg.menu_detect_frames and not args.no_menu_nav:
                 print(f"  [menu] navigating character select …")
-                spent = navigate_menu(env, sensory_buf, motor_buf, cfg, roi)
+                spent = navigate_menu(env, sensory_buf, audio_buf, motor_buf, cfg, roi)
                 model.reset_hidden()
                 health_absent = 0
                 navigations += 1
@@ -178,8 +195,10 @@ def main():
             # ---- normal gameplay ----
             flow = sensory_buf.get_flow()
             if flow is not None:
+                audio_feats = audio_buf.get_features()
                 with torch.no_grad():
-                    actions, hidden = model.step(flow, model.hidden)
+                    actions, hidden = model.step(flow, model.hidden,
+                                                 audio_feats=audio_feats)
                     model.hidden = hidden
 
                 if args.deterministic:
@@ -236,6 +255,7 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        audio_cap.stop()
         env.close()
 
 

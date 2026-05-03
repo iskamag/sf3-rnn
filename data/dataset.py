@@ -77,10 +77,17 @@ class ReplayDataset(Dataset):
             else:
                 hp1 = hp2 = np.zeros(L, dtype=np.float32)
 
+            af = data.get("audio", None)
+            if af is not None:
+                af = af[t0 : t0 + L].copy()
+            else:
+                af = np.zeros((L, 15), dtype=np.float32)
+
         return {
             "flows":    torch.from_numpy(fs.astype(np.float32, copy=False)),
             "movement": torch.from_numpy(mv.astype(np.int64, copy=False)),
             "buttons":  torch.from_numpy(bt.astype(np.float32, copy=False)),
             "hp1":      torch.from_numpy(hp1.astype(np.float32, copy=False)),
             "hp2":      torch.from_numpy(hp2.astype(np.float32, copy=False)),
+            "audio":    torch.from_numpy(af.astype(np.float32, copy=False)),
         }

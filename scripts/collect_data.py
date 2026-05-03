@@ -3,24 +3,25 @@
 
   1.  Parse Fightcade .fc2 replays  →  per-frame inputs
   2.  (opt) Screen-capture replay playback  →  per-frame images
-  3.  Compute optical flow
-  4.  Detect match boundaries — trim character select, intros, victory screens
-  5.  Save one .npz per match
+  3.  (opt) Record system audio during playback  →  per-frame features
+  4.  Compute optical flow
+  5.  Detect match boundaries — trim character select, intros, victory screens
+  6.  Save one .npz per match
 
 Usage:
     python scripts/collect_data.py \
         --replay-dir data/replays \
+        --frames-dir data/frames \
         --output-dir data/processed
 
-If frames are available the script uses health-bar HSV detection to find
-match starts/ends.  Without frames it falls back to a button-activity
-heuristic (menus have sparse directional inputs; gameplay has frequent
-button presses).
+For audio: record system output at 16 kHz mono while the replay plays
+and place the .wav at  <frames-dir>/<replay_stem>/audio.wav .
 """
 
 from __future__ import annotations
 
 import argparse
+import wave
 from pathlib import Path
 
 import cv2
@@ -32,11 +33,55 @@ from config import Config
 from model.action_space import bitfield_to_action
 from replay.parser import parse_replay
 from vision.optical_flow import compute_flow, preprocess_flow
+from vision.audio_features import extract_features
 from vision.game_state import (
     health_signal_from_inputs, find_match_boundaries, has_health_bar,
 )
 
 ROI_KEYS = ["p1_health", "p2_health", "p1_stun", "p2_stun"]
+
+
+# ---------------------------------------------------------------------------
+# Audio loading
+# ---------------------------------------------------------------------------
+def load_audio_features(wav_path: Path,
+                        num_frames: int,
+                        sample_rate: int = 16000,
+                        ) -> np.ndarray:
+    """Load a 16 kHz mono WAV and compute per-frame audio features.
+
+    Returns (num_frames, 15) float32.  Frames past the audio length are
+    zero-padded.
+    """
+    with wave.open(str(wav_path), "rb") as wf:
+        sr = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+        dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(wf.getsampwidth(), np.int16)
+        samples = np.frombuffer(raw, dtype=dtype).astype(np.float32)
+        max_val = float(np.iinfo(dtype).max)
+        samples /= max_val
+        if wf.getnchannels() == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1)
+
+    # Resample to 16 kHz if needed
+    if sr != sample_rate:
+        import math
+        ratio = sample_rate / sr
+        n_out = int(len(samples) * ratio)
+        out = np.interp(
+            np.linspace(0, len(samples) - 1, n_out),
+            np.arange(len(samples)), samples,
+        ).astype(np.float32)
+        samples = out
+
+    spf = 256  # 256 samples @ 16 kHz ≈ 16 ms, power-of-2 FFT
+    feats = np.zeros((num_frames, 15), dtype=np.float32)
+    for i in range(num_frames):
+        start = i * spf
+        chunk = samples[start : start + spf]
+        if len(chunk) >= 16:
+            feats[i] = extract_features(chunk, sample_rate)
+    return feats
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +107,8 @@ def build_health_signal_from_buttons(buttons: np.ndarray) -> np.ndarray:
 def save_match(output_dir: Path, stem: str, idx: int,
                flows: np.ndarray, movements: np.ndarray,
                buttons: np.ndarray, hp1: np.ndarray,
-               hp2: np.ndarray, start: int, end: int):
+               hp2: np.ndarray, audio_feats: np.ndarray,
+               start: int, end: int):
     """Save one match window to a .npz file."""
     # flows has one fewer frame than actions
     f_start = max(0, start - 1)      # flow[i] covers frame i → i+1
@@ -76,6 +122,7 @@ def save_match(output_dir: Path, stem: str, idx: int,
         buttons=buttons[start:end],
         health_p1=hp1[start:end],
         health_p2=hp2[start:end],
+        audio=audio_feats[start:end],
     )
     return out
 
@@ -90,10 +137,15 @@ def main():
                    help="Directory tree of pre-captured frames  "
                         "(frames-dir/<replay_stem>/frame_*.png).  "
                         "If absent, matches are split via input-activity heuristic.")
+    p.add_argument("--audio-dir", type=Path, default=None,
+                   help="Directory of recorded audio  "
+                        "(audio-dir/<replay_stem>/audio.wav).  "
+                        "Defaults to --frames-dir if not set.")
     args = p.parse_args()
 
     cfg = Config()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir = args.audio_dir or args.frames_dir
 
     replay_files = sorted(args.replay_dir.glob("*.fc2"))
     if not replay_files:
@@ -167,6 +219,13 @@ def main():
             flows = np.zeros((max(0, n_frames - 1), 2,
                               cfg.frame_size, cfg.frame_size), dtype=np.float32)
 
+        # ---- audio features ----
+        audio_feats = np.zeros((n_frames, cfg.audio_feat_dim), dtype=np.float32)
+        if audio_dir:
+            wav = audio_dir / rp.stem / "audio.wav"
+            if wav.exists():
+                audio_feats = load_audio_features(wav, n_frames, cfg.audio_sample_rate)
+
         # ---- actions ----
         movements = np.zeros(n_frames, dtype=np.int64)
         buttons_arr = np.zeros((n_frames, 6), dtype=np.float32)
@@ -183,11 +242,11 @@ def main():
             signal = build_health_signal_from_buttons(buttons_arr)
 
         if signal is None or signal.sum() < 120:
-            # Save whole file as one match if we can't split
             out = args.output_dir / f"{rp.stem}.npz"
             np.savez_compressed(out, flows=flows, movement=movements,
                                 buttons=buttons_arr,
-                                health_p1=hp1_raw, health_p2=hp2_raw)
+                                health_p1=hp1_raw, health_p2=hp2_raw,
+                                audio=audio_feats)
             tqdm.write(f"  {out.name}  ({n_frames} f, unsplit)")
             total_matches += 1
             continue
@@ -197,7 +256,8 @@ def main():
             out = args.output_dir / f"{rp.stem}.npz"
             np.savez_compressed(out, flows=flows, movement=movements,
                                 buttons=buttons_arr,
-                                health_p1=hp1_raw, health_p2=hp2_raw)
+                                health_p1=hp1_raw, health_p2=hp2_raw,
+                                audio=audio_feats)
             tqdm.write(f"  {out.name}  ({n_frames} f, no matches found)")
             total_matches += 1
             continue
@@ -205,7 +265,7 @@ def main():
         for mi, (start, end) in enumerate(boundaries):
             out = save_match(args.output_dir, rp.stem, mi,
                              flows, movements, buttons_arr,
-                             hp1_raw, hp2_raw, start, end)
+                             hp1_raw, hp2_raw, audio_feats, start, end)
         total_matches += len(boundaries)
         tqdm.write(f"  {rp.stem} → {len(boundaries)} matches  "
                    f"(trimmed {n_frames}→{sum(e-s for s,e in boundaries)} frames)")

@@ -1,8 +1,12 @@
-"""CNN → LSTM policy model for SF3.
+"""CNN + Audio → LSTM policy model for SF3.
 
-One optical-flow frame per LSTM timestep.  The LSTM's hidden state carries
-over across the full episode during RL / inference, and across a truncated
-sequence during behaviour-cloning.
+Visual:  optical flow (2-ch) → FlowCNN → feature_dim
+Audio:   MFCC + energy features  → AudioMLP → audio_dim
+Fused:   concat(visual, audio)   → LSTM → movement / buttons / value
+
+Audio features are always expected.  During BC training (no audio capture)
+they are filled with zeros; the model learns to rely on visual features
+primarily, and audio becomes additive during PPO / inference.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# Small 2-channel CNN (optical-flow input → feature vector)
+# Visual encoder — 2-channel optical flow → feature vector
 # ---------------------------------------------------------------------------
 class _FlowEncoder(nn.Module):
     def __init__(self, feature_dim: int = 256):
@@ -42,22 +46,48 @@ class _FlowEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Audio encoder — 15-d acoustic features → compact embedding
+# ---------------------------------------------------------------------------
+class _AudioEncoder(nn.Module):
+    def __init__(self, in_dim: int = 15, out_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 64),
+            nn.ReLU(),
+            nn.Linear(64, out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:       # (..., 15) → (..., A)
+        lead = x.shape[:-1]
+        flat = x.reshape(-1, x.shape[-1])
+        feats = self.net(flat)
+        return feats.reshape(*lead, -1)
+
+
+# ---------------------------------------------------------------------------
 # Full model
 # ---------------------------------------------------------------------------
 class SF3RNN(nn.Module):
     def __init__(self,
                  feature_dim: int = 256,
+                 audio_dim: int = 64,
                  lstm_hidden: int = 512,
                  lstm_layers: int = 2,
                  lstm_dropout: float = 0.1,
                  num_directions: int = 9,
-                 num_buttons: int = 6):
+                 num_buttons: int = 6,
+                 audio_feat_dim: int = 15,
+                 ):
         super().__init__()
         self.lstm_hidden = lstm_hidden
         self.lstm_layers = lstm_layers
 
         self.encoder = _FlowEncoder(feature_dim)
-        self.lstm = nn.LSTM(feature_dim, lstm_hidden,
+        self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
+
+        self.lstm = nn.LSTM(feature_dim + audio_dim, lstm_hidden,
                             num_layers=lstm_layers,
                             dropout=lstm_dropout,
                             batch_first=True)
@@ -73,7 +103,6 @@ class SF3RNN(nn.Module):
             nn.Linear(*head), nn.ReLU(), nn.Linear(head[1], 1),
         )
 
-        # Carried across episode steps during online play
         self.hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
     # ------------------------------------------------------------------
@@ -84,18 +113,20 @@ class SF3RNN(nn.Module):
     def forward(self,
                 flows: torch.Tensor,                          # (B, T, 2, H, W)
                 hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                audio: Optional[torch.Tensor] = None,          # (B, T, 15) or None
                 ) -> Dict[str, torch.Tensor]:
-        """One LSTM step per optical-flow frame.
+        vis = self.encoder(flows)                             # (B, T, F)
 
-        Returns
-        -------
-        "movement"  (B, T, 9)  raw logits
-        "buttons"   (B, T, 6)  raw logits (sigmoid → probability)
-        "value"     (B, T)     scalar value estimate
-        "hidden"    tuple of final (h, c)
-        """
-        feats = self.encoder(flows)                           # (B, T, F)
-        lstm_out, h = self.lstm(feats, hidden)                # (B, T, H)
+        if audio is not None:
+            aud = self.audio_encoder(audio)                   # (B, T, A)
+            feats = torch.cat([vis, aud], dim=-1)              # (B, T, F+A)
+        else:
+            B, T = vis.shape[:2]
+            zeros = torch.zeros(B, T, self.audio_encoder.net[-1].out_features,
+                                device=vis.device, dtype=vis.dtype)
+            feats = torch.cat([vis, zeros], dim=-1)
+
+        lstm_out, h = self.lstm(feats, hidden)
 
         return {
             "movement": self.movement_head(lstm_out),
@@ -109,9 +140,12 @@ class SF3RNN(nn.Module):
     def step(self,
              flow: torch.Tensor,                              # (1, 1, 2, H, W)
              hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+             audio_feats: Optional[torch.Tensor] = None,       # (1, 15)
              ) -> Tuple[Dict[str, torch.Tensor],
                         Tuple[torch.Tensor, torch.Tensor]]:
-        """Single-timestep inference.  *flow* is the (delayed) OF frame."""
-        out = self.forward(flow, hidden=hidden)
+        """Single-timestep inference.  *flow* and *audio_feats* are the
+        (separately delayed) sensory inputs."""
+        audio = audio_feats.unsqueeze(1) if audio_feats is not None else None
+        out = self.forward(flow, hidden=hidden, audio=audio)
         actions = {k: out[k][:, -1] for k in ("movement", "buttons", "value")}
         return actions, (out["hidden"][0], out["hidden"][1])

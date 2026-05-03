@@ -7,28 +7,30 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  screen capture                                          │
-│      ↓                                                   │
-│  Greyscale resize (128 × 128)                            │
-│      ↓                                                   │
-│  ReactionBuffer — sensory lag  (~100 ms / 6 frames)      │
-│      ↓                                                   │
-│  Farneback optical flow  (2-ch, 128 × 128)               │
-│      ↓                                                   │
-│  CNN encoder → 256-d feature                             │
-│      ↓                                                   │
-│  2-layer LSTM (hidden=512)  ←  hidden state persistent   │
-│      ↓                                                   │
-│  ┌──────────┬──────────┬──────────┐                      │
-│  │ movement │ buttons  │  value   │                      │
-│  │ (9-way)  │ (6-bit)  │  scalar  │                      │
-│  └──────────┴──────────┴──────────┘                      │
-│      ↓                                                   │
-│  OutputDelayBuffer — motor lag  (~100 ms / 6 frames)     │
-│      ↓                                                   │
-│  game input                                              │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  screen capture                         audio capture       │
+│      ↓                                       ↓              │
+│  Greyscale resize (128 × 128)         16 kHz mono           │
+│      ↓                                       ↓              │
+│  ReactionBuffer — visual lag 8 f       AudioBuffer — 3 f    │
+│      ↓                                       ↓              │
+│  Farneback OF  (2-ch, 128×128)        MFCC+energy  (15-d)  │
+│      ↓                                       ↓              │
+│  FlowCNN → 256-d                       AudioMLP → 64-d      │
+│      ↓                                       ↓              │
+│      └───────── concat ──── 320-d ──────────┘              │
+│                        ↓                                    │
+│  2-layer LSTM (hidden=512)  ←  hidden state persistent      │
+│                        ↓                                    │
+│  ┌──────────┬──────────┬──────────┐                         │
+│  │ movement │ buttons  │  value   │                         │
+│  │ (9-way)  │ (6-bit)  │  scalar  │                         │
+│  └──────────┴──────────┴──────────┘                         │
+│                        ↓                                    │
+│  OutputDelayBuffer — motor lag 4 f                          │
+│                        ↓                                    │
+│  game input                                                 │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 **Why optical flow instead of raw pixels?**
@@ -39,19 +41,22 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 **Why two latency buffers?**
 Real human reaction time splits into:
 
-| Pipeline stage        | Latency   | Frames  | Buffer              |
-|-----------------------|-----------|---------|----------------------|
-| Display + retina + V1 | ≈ 100 ms  | 6 frm   | `ReactionBuffer`    |
-| Neural + muscle + USB | ≈ 100 ms  | 6 frm   | `OutputDelayBuffer` |
-| **Total**             | 200 ms    | 12 frm  | —                   |
+| Pipeline stage              | Latency   | Frames  | Buffer              |
+|-----------------------------|-----------|---------|----------------------|
+| Visual (retina + V1)        | ≈ 130 ms  | 8 frm   | `ReactionBuffer`    |
+| Audio  (cochlea + cortex)   | ≈ 50 ms   | 3 frm   | `AudioBuffer`       |
+| Motor  (nerves + muscle)    | ≈ 67 ms   | 4 frm   | `OutputDelayBuffer` |
+| **Total visual reaction**   | 200 ms    | 12 frm  | —                   |
 
-The CNN + LSTM forward pass is treated as instantaneous — the biological
-"thinking" time is modelled by the gap between the two buffers.
+Audio reaches consciousness ~3× faster than vision, so it gets its own
+shorter-delay buffer.  The LSTM fuses both streams — visual flow (256-d)
+and acoustic features (64-d) — at each timestep.
 
 ### Model detail
 
 - **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d
 - **LSTM**: 2 layers, hidden=512, dropout=0.1
+- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → MLP → 64-d, fused with visual by concatenation
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 
 ## Project layout
@@ -61,12 +66,14 @@ st-rnn/
 ├── config.py                  # All hyperparameters
 ├── model/
 │   ├── action_space.py        # Direction / Button enums, CPS3 bitfield codec
-│   ├── rnn.py                 # CNN + LSTM + value head
-│   ├── reaction_buffer.py     # Sensory-lag frame buffer
+│   ├── rnn.py                 # FlowCNN + AudioMLP → LSTM + value head
+│   ├── reaction_buffer.py     # Visual sensory-lag frame buffer
+│   ├── audio_buffer.py        # Audio sensory-lag buffer (shorter delay)
 │   └── output_buffer.py       # Motor-lag action buffer
 ├── vision/
 │   ├── optical_flow.py        # Farneback flow computation
-│   └── game_state.py          # Health / stun / meter extraction from HUD
+│   ├── audio_features.py      # MFCC + RMS + spectral centroid per frame
+│   └── game_state.py          # Health / stun / meter extraction + match splitting
 ├── data/
 │   └── dataset.py             # PyTorch Dataset (replay .npz files)
 ├── train/
@@ -74,6 +81,10 @@ st-rnn/
 │   ├── ppo.py                 # PPO trainer + rollout buffer
 │   └── reward.py              # Health-delta reward + GAE
 ├── replay/
+│   └── parser.py              # Fightcade .fc2 replay parser
+├── env/
+│   ├── sf3_env.py             # Screen-capture / RetroArch environment
+│   └── audio_capture.py       # Background audio capture via sounddevice
 │   └── parser.py              # Fightcade .fc2 replay parser
 ├── env/
 │   └── sf3_env.py             # Screen-capture / RetroArch environment
@@ -214,11 +225,13 @@ All tunables live in `config.py`.  Key ones:
 
 | Parameter              | Default | Meaning                              |
 |------------------------|---------|--------------------------------------|
-| `sensory_lag_frames`   | 6       | Input-side delay (frames)            |
-| `motor_lag_frames`     | 6       | Output-side delay (frames)           |
-| `total_delay_frames`   | 12      | Sum of above ≈ 200 ms @ 60 fps       |
-| `frame_size`           | 128     | Greyscale resize (square)            |
-| `flow_norm`            | 20.0    | Max expected displacement per frame  |
+| `sensory_lag_frames`   | 8       | Visual sensory delay (frames)        |
+| `audio_lag_frames`     | 3       | Audio sensory delay (faster pathway) |
+| `motor_lag_frames`     | 4       | Motor/output delay (frames)          |
+| `total_delay_frames`   | 12      | Visual total ≈ 200 ms @ 60 fps       |
+| `use_audio`            | True    | Enable audio capture & features      |
+| `audio_dim`            | 64      | Internal audio embedding size        |
+| `feature_dim`          | 256     | Visual feature dimension             |
 | `lstm_hidden`          | 512     | LSTM hidden size                     |
 | `lstm_layers`          | 2       | LSTM depth                           |
 | `seq_len`              | 128     | BC training segment length           |

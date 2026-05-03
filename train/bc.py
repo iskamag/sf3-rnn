@@ -49,6 +49,7 @@ class BCTrainer:
 
         self.model = SF3RNN(
             feature_dim=cfg.feature_dim,
+            audio_dim=cfg.audio_dim,
             lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers,
             lstm_dropout=cfg.lstm_dropout,
@@ -85,8 +86,9 @@ class BCTrainer:
                 flows = batch["flows"].to(self.device, non_blocking=True)
                 movement = batch["movement"].to(self.device, non_blocking=True)
                 buttons = batch["buttons"].to(self.device, non_blocking=True)
+                audio = batch["audio"].to(self.device, non_blocking=True)
 
-                out = self.model(flows)                         # (B, L, …)
+                out = self.model(flows, audio=audio)
                 loss = bc_loss(out, {"movement": movement, "buttons": buttons})
 
                 self.optim.zero_grad(set_to_none=True)

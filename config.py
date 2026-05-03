@@ -10,36 +10,28 @@ class Config:
     native_height: int = 224
 
     # --- Reaction-time constraint ---
-    # Total human visual reaction ≈ 200–250 ms → 12–15 frames @ 60 fps.
-    # The model fuses sensory + motor latency into one total delay:
-    #   sensory lag (display + retina + V1)  ~100 ms  ~ 6 frames
-    #   motor   lag (nerves + muscle + USB)  ~100 ms  ~ 6 frames
-    #   ─────────────────────────────────────────────
-    #   total_delay ≈ 200 ms ≈ 12 frames
+    # Human pipelines have different latencies:
     #
-    # You can split these explicitly with sensory_lag_frames +
-    # motor_lag_frames = total_delay.  The ReactionBuffer implements
-    # sensory lag; OutputDelayBuffer (optional) implements motor lag.
-    # For training data the target offset equals total_delay.
-    sensory_lag_frames: int = 6
-    motor_lag_frames: int = 6
+    #   Visual:  photoreceptors → retina → V1 → higher cortex  ≈ 100–140 ms  ≈ 8 f
+    #   Audio:   cochlea → brainstem → auditory cortex          ≈  40–60 ms  ≈ 3 f
+    #   Motor:   cortex → spinal cord → muscle → USB poll       ≈  50–70 ms  ≈ 4 f
+    #
+    # The model sees visual flow delayed by sensory_lag, audio features
+    # delayed by audio_lag (shorter), and actions are held by motor_lag.
+    # Total end-to-end visual reaction = sensory_lag + motor_lag ≈ 200 ms.
+    sensory_lag_frames: int = 8       # visual input delay
+    audio_lag_frames: int = 3         # audio input delay  (faster pathway)
+    motor_lag_frames: int = 4         # output delay
 
     @property
     def total_delay_frames(self) -> int:
         return self.sensory_lag_frames + self.motor_lag_frames
 
-    # --- Vision ---
-    frame_size: int = 128       # resize greyscale frames to square
-    flow_norm: float = 20.0     # max expected displacement for normalisation
-
-    # Health-bar bounding boxes in NATIVE resolution (384 x 224)
-    # Values below are approximations — calibrate with your setup.
-    p1_health_roi: tuple = (96, 32, 151, 5)
-    p2_health_roi: tuple = (138, 32, 151, 5)
-    p1_stun_roi: tuple = (96, 40, 151, 3)
-    p2_stun_roi: tuple = (138, 40, 151, 3)
-    super_bar_y: int = 212       # y coordinate of super-meter bar
-    timer_roi: tuple = (180, 18, 25, 12)
+    # --- Audio ---
+    use_audio: bool = True           # capture & feed audio features
+    audio_sample_rate: int = 16000
+    audio_feat_dim: int = 15         # MFCC (13) + RMS (1) + centroid (1)
+    audio_dim: int = 64              # internal embedding size
 
     # --- Model ---
     feature_dim: int = 256

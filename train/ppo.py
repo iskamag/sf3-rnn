@@ -33,6 +33,7 @@ class RolloutBuffer:
 
     def reset(self):
         self.flows: list[torch.Tensor] = []           # each (2, H, W) on CPU
+        self.audios: list[torch.Tensor] = []           # each (15,) on CPU
         self.movements: list[int] = []
         self.button_masks: list[torch.Tensor] = []    # each (6,) float
         self.log_probs: list[torch.Tensor] = []       # scalar
@@ -40,11 +41,12 @@ class RolloutBuffer:
         self.rewards: list[float] = []
         self.dones: list[bool] = []
 
-    def add(self, flow: torch.Tensor, movement: int, buttons: torch.Tensor,
+    def add(self, flow: torch.Tensor, audio_feats: torch.Tensor,
+            movement: int, buttons: torch.Tensor,
             log_prob: torch.Tensor, value: torch.Tensor,
             reward: float, done: bool):
-        # flow is (1, 1, 2, H, W) → squeeze to (2, H, W)
         self.flows.append(flow.squeeze(0).squeeze(0).cpu())
+        self.audios.append(audio_feats.cpu())
         self.movements.append(movement)
         self.button_masks.append(buttons.cpu())
         self.log_probs.append(log_prob.detach().cpu())
@@ -54,9 +56,10 @@ class RolloutBuffer:
 
     def get_batch(self, device: torch.device) -> dict[str, torch.Tensor]:
         return {
-            "flows":         torch.stack(self.flows).to(device),              # (T, 2, H, W)
+            "flows":         torch.stack(self.flows).to(device),
+            "audio":         torch.stack(self.audios).to(device),              # (T, 15)
             "movement":      torch.tensor(self.movements, dtype=torch.long, device=device),
-            "buttons":       torch.stack(self.button_masks).to(device),        # (T, 6)
+            "buttons":       torch.stack(self.button_masks).to(device),
             "old_log_probs": torch.stack(self.log_probs).to(device),
             "values":        torch.stack(self.values).to(device),
             "rewards":       torch.tensor(self.rewards, dtype=torch.float32, device=device),
@@ -77,6 +80,7 @@ class PPOTrainer:
 
         self.model = SF3RNN(
             feature_dim=cfg.feature_dim,
+            audio_dim=cfg.audio_dim,
             lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers,
             lstm_dropout=cfg.lstm_dropout,
@@ -103,8 +107,9 @@ class PPOTrainer:
         cfg = self.cfg
 
         # ---- Run model over the full episode ----
-        # flows: (T, 2, H, W) → add batch dim → (1, T, 2, H, W)
-        out = self.model(batch["flows"].unsqueeze(0))
+        # flows: (T, 2, H, W), audio: (T, 15) → add batch dim → (1, T, …)
+        out = self.model(batch["flows"].unsqueeze(0),
+                         audio=batch["audio"].unsqueeze(0))
         new_mov = out["movement"].squeeze(0)          # (T, 9)
         new_btn = out["buttons"].squeeze(0)           # (T, 6)
         new_val = out["value"].squeeze(0)             # (T,)
