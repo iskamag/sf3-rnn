@@ -35,7 +35,7 @@ def _on_response(response, results, path=None):
         PHASE = 1
         SC.SelectSources(SESSION_HANDLE, {
             "handle_token": TOKEN,
-            "types": dbus.UInt32(1),    # monitor
+            "types": dbus.UInt32(2),    # 2 = window capture
             "multiple": dbus.Boolean(False),
             "cursor_mode": dbus.UInt32(2),
         })
