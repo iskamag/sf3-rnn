@@ -18,7 +18,6 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 EMU_DIR="$HOME/fightcade-emu"
 WINEPREFIX="$HOME/.fightcade-wine"
 OUT_DIR="$PROJECT_DIR/data/captures/$CHALLENGE_ID"
-TOKEN="st_rnn_$$"
 
 export WINEPREFIX WINEDEBUG=-all
 mkdir -p "$OUT_DIR"
@@ -31,7 +30,6 @@ _cleanup() {
     [ -n "$VID_PID" ] && kill $VID_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
-    # Collect input log if it exists
     if [ -f "$EMU_DIR/input_log.txt" ]; then
         cp "$EMU_DIR/input_log.txt" "$OUT_DIR/input_log.txt"
     fi
@@ -55,18 +53,19 @@ EMU_PID=$!
 sleep 5
 
 # ---- Screen capture via portal ----
-echo "[2/3] Starting screen capture …"
+echo "[2/3] Starting screen capture (accept the dialog) …"
 PWNODE=""
-if python3 "$SCRIPT_DIR/start_screencast.py" "$TOKEN" > /tmp/st_rnn_node 2>/tmp/st_rnn_err; then
+if python3 "$SCRIPT_DIR/start_screencast.py" > /tmp/st_rnn_node 2>/tmp/st_rnn_err; then
     PWNODE=$(cat /tmp/st_rnn_node)
     echo "  pipewire node: $PWNODE"
 else
-    echo "  WARNING: screencast failed — no video will be captured"
-    cat /tmp/st_rnn_err >&2
+    echo "  WARNING: screencast failed — no video"
     PWNODE=""
 fi
 
-# ---- Video + Audio via pw-v4l2 + ffmpeg ----
+# ---- Video (gstreamer pipewiresrc → ffmpeg VAAPI) + Audio ----
+echo "[3/3] Recording …"
+
 HWENC="libx264"
 HWOPT="-preset ultrafast -crf 23"
 if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_vaapi; then
@@ -74,31 +73,32 @@ if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_vaapi; then
     HWOPT="-b:v 200k"
 fi
 
+# Audio: simple pw-record
+pw-record --rate 16000 --channels 1 --format u8 \
+    "$OUT_DIR/audio.wav" &
+AUDIO_PID=$!
+
 if [ -n "$PWNODE" ]; then
-    echo "[3/3] Recording video+audio …"
-    pw-v4l2 \
-        ffmpeg -y \
-            -f v4l2 -thread_queue_size 128 -i /dev/video0 \
-            -f pulse -i default \
-            -map 0:v \
-            -vf "scale=128:128:flags=bilinear,format=gray,fps=60" \
+    # Gstreamer: pipewire → resize → gray → pipe to ffmpeg VAAPI
+    gst-launch-1.0 -e \
+        pipewiresrc path="$PWNODE" \
+            ! video/x-raw,framerate=60/1 \
+        ! videoscale \
+        ! video/x-raw,width=128,height=128 \
+        ! videoconvert \
+        ! video/x-raw,format=GRAY8 \
+        ! fdsink fd=1 \
+        2>/dev/null \
+        | ffmpeg -y \
+            -f rawvideo -pixel_format gray -video_size 128x128 -framerate 60 -i - \
             -c:v "$HWENC" $HWOPT \
             -an \
             "$OUT_DIR/video.mkv" \
-            \
-            -map 1:a \
-            -vn \
-            -c:a pcm_u8 -ar 16000 -ac 1 \
-            "$OUT_DIR/audio.wav" \
-        &>/dev/null &
-    VID_PID=$!
-else
-    echo "[3/3] Recording audio only …"
-    pw-record --rate 16000 --channels 1 --format u8 \
-        "$OUT_DIR/audio.wav" &
+        2>/dev/null &
     VID_PID=$!
 fi
 
 # ---- Wait ----
-echo "Recording — press Ctrl+C when replay ends, or wait for emulator to exit …"
+echo "Recording — press Ctrl+C when replay ends, or wait …"
 wait $EMU_PID 2>/dev/null || true
+[ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
