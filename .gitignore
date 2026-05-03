@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 data/processed/
 data/replays/
+data/captures/
 checkpoints/
 logs/
 *.pt
