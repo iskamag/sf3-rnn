@@ -83,8 +83,9 @@ if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
-        ! videoconvertscale \
-        ! video/x-raw,width=128,height=128,format=GRAY8,framerate=60/1 \
+        ! videoconvert \
+        ! videoscale \
+        ! video/x-raw,width=128,height=128,format=GRAY8 \
         ! jpegenc quality=92 \
         ! jpegparse \
         ! matroskamux \
