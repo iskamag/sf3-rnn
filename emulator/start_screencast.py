@@ -51,15 +51,15 @@ def _on_response(response, results, path=None):
         streams = results.get("streams", [])
         print(f"Start response: {len(streams)} streams", file=sys.stderr)
         if streams:
-            props = streams[0][1]
-            node = props.get("pipewire_node_id")
+            s = streams[0]
+            print(f"stream struct: id={s[0]} props={dict(s[1])}", file=sys.stderr)
+            props = s[1]
+            for k, v in props.items():
+                print(f"  {k} = {v!r}", file=sys.stderr)
+            # KDE uses "node_id" or "pipewire_node_id" depending on portal version
+            node = props.get("pipewire_node_id") or props.get("node_id")
             if node:
                 PIPEWIRE_NODE = str(node)
-                print(f"Got node: {PIPEWIRE_NODE}", file=sys.stderr)
-            else:
-                print(f"No pipewire_node_id in props: {list(props.keys())}", file=sys.stderr)
-        else:
-            print("No streams in Start response", file=sys.stderr)
         LOOP.quit()
 
 
