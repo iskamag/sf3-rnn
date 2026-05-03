@@ -85,7 +85,6 @@ if [ -n "$PWNODE" ]; then
     # Gstreamer: pipewire → resize → gray → pipe to ffmpeg VAAPI
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
-            ! video/x-raw,framerate=60/1 \
         ! videoscale \
         ! video/x-raw,width=128,height=128 \
         ! videoconvert \
