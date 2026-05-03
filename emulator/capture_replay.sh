@@ -85,8 +85,10 @@ if [ -n "$PWNODE" ]; then
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8,framerate=60/1 \
+        ! queue \
         ! jpegenc quality=92 \
-        ! image/jpeg,framerate=60/1 \
+        ! jpegparse \
+        ! queue \
         ! avimux \
         ! filesink location="$OUT_DIR/video.avi" \
         2>/tmp/st_rnn_gst_err &
