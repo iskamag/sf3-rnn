@@ -5,7 +5,7 @@
 #   ./emulator/capture_replay.sh <challenge_id> [game]
 #
 # Output (data/captures/<challenge_id>/):
-#   video.avi      — 128×128 grayscale MJPEG, 60 fps
+#   video.mkv      — 128×128 grayscale MJPEG, 60 fps
 #   audio.wav      — 8-bit mono 16 kHz PCM
 #   input_log.txt  — per-frame inputs + health from Lua
 
@@ -82,15 +82,13 @@ AUDIO_PID=$!
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
     gst-launch-1.0 -e \
-        pipewiresrc path="$PWNODE" \
+        pipewiresrc path="$PWNODE" do-timestamp=true \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8,framerate=60/1 \
-        ! queue \
         ! jpegenc quality=92 \
         ! jpegparse \
-        ! queue \
-        ! avimux \
-        ! filesink location="$OUT_DIR/video.avi" \
+        ! matroskamux \
+        ! filesink location="$OUT_DIR/video.mkv" \
         2>/tmp/st_rnn_gst_err &
     GST_PID=$!
     sleep 1
