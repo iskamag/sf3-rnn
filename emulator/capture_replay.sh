@@ -85,8 +85,7 @@ if [ -n "$PWNODE" ]; then
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
-        ! openh264enc \
-        ! h264parse \
+        ! jpegenc quality=85 \
         ! matroskamux \
         ! filesink location="$OUT_DIR/video.mkv" \
         2>/tmp/st_rnn_gst_err &
