@@ -86,6 +86,7 @@ if [ -n "$PWNODE" ]; then
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
         ! jpegenc quality=85 \
+        ! jpegparse \
         ! matroskamux \
         ! filesink location="$OUT_DIR/video.mkv" \
         2>/tmp/st_rnn_gst_err &
