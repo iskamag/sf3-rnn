@@ -55,11 +55,13 @@ sleep 5
 # ---- Screen capture via portal ----
 echo "[2/3] Starting screen capture (accept the dialog) …"
 PWNODE=""
-if python3 "$SCRIPT_DIR/start_screencast.py" > /tmp/st_rnn_node 2>/tmp/st_rnn_err; then
-    PWNODE=$(cat /tmp/st_rnn_node)
+python3 "$SCRIPT_DIR/start_screencast.py" > /tmp/st_rnn_node 2>/tmp/st_rnn_err || true
+PWNODE=$(cat /tmp/st_rnn_node 2>/dev/null)
+if [ -n "$PWNODE" ]; then
     echo "  pipewire node: $PWNODE"
 else
-    echo "  WARNING: screencast failed — no video"
+    echo "  WARNING: screencast failed"
+    echo "  stderr: $(head -c 200 /tmp/st_rnn_err 2>/dev/null)"
     PWNODE=""
 fi
 
@@ -79,6 +81,7 @@ pw-record --rate 16000 --channels 1 --format u8 \
 AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
+    echo "  Capturing video from node $PWNODE"
     # Gstreamer: pipewire → resize → gray → pipe to ffmpeg VAAPI
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
@@ -88,14 +91,21 @@ if [ -n "$PWNODE" ]; then
         ! videoconvert \
         ! video/x-raw,format=GRAY8 \
         ! fdsink fd=1 \
-        2>/dev/null \
-        | ffmpeg -y \
+        2>/tmp/st_rnn_gst_err \
+        | ffmpeg -y -v warning \
             -f rawvideo -pixel_format gray -video_size 128x128 -framerate 60 -i - \
             -c:v "$HWENC" $HWOPT \
             -an \
             "$OUT_DIR/video.mkv" \
-        2>/dev/null &
+        2>/tmp/st_rnn_ffmpeg_err &
     VID_PID=$!
+    sleep 1
+    if ! kill -0 $VID_PID 2>/dev/null; then
+        echo "  ERROR: capture process died immediately"
+        echo "  gst: $(head -c 300 /tmp/st_rnn_gst_err 2>/dev/null)"
+        echo "  ffmpeg: $(head -c 300 /tmp/st_rnn_ffmpeg_err 2>/dev/null)"
+        VID_PID=""
+    fi
 fi
 
 # ---- Wait ----

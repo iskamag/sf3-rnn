@@ -32,6 +32,7 @@ def _on_response(response, results, path=None):
 
     if PHASE == 0:                      # CreateSession response
         SESSION_HANDLE = results["session_handle"]
+        print(f"Session created: {SESSION_HANDLE}", file=sys.stderr)
         PHASE = 1
         SC.SelectSources(SESSION_HANDLE, {
             "handle_token": TOKEN,
@@ -39,19 +40,26 @@ def _on_response(response, results, path=None):
             "multiple": dbus.Boolean(False),
             "cursor_mode": dbus.UInt32(2),
         })
+        print("SelectSources called — pick the gamescope window", file=sys.stderr)
 
     elif PHASE == 1:                    # SelectSources response (dialog accepted)
+        print("Source selected, calling Start", file=sys.stderr)
         PHASE = 2
         SC.Start(SESSION_HANDLE, "", {"handle_token": TOKEN})
 
     elif PHASE == 2:                    # Start response — got streams
         streams = results.get("streams", [])
+        print(f"Start response: {len(streams)} streams", file=sys.stderr)
         if streams:
-            # struct is (uint32 stream_id, dict properties)
             props = streams[0][1]
             node = props.get("pipewire_node_id")
             if node:
                 PIPEWIRE_NODE = str(node)
+                print(f"Got node: {PIPEWIRE_NODE}", file=sys.stderr)
+            else:
+                print(f"No pipewire_node_id in props: {list(props.keys())}", file=sys.stderr)
+        else:
+            print("No streams in Start response", file=sys.stderr)
         LOOP.quit()
 
 
