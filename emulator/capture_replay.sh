@@ -48,7 +48,7 @@ rm -f "$EMU_DIR/input_log.txt"
 # ---- Launch emulator ----
 echo "[1/3] Launching emulator (gamescope) …"
 gamescope \
-    -W 768 -H 448 -r 60 \
+    -W 640 -H 480 -r 60 \
     -- wine "$EMU_DIR/fcadefbneo.exe" \
     "quark:stream,$GAME,$CHALLENGE_ID.2,7100" \
     -q -lua input_log.lua &
