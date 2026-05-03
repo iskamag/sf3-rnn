@@ -55,23 +55,30 @@ gamescope \
 EMU_PID=$!
 sleep 5
 
-# ---- Screen capture via portal ----
-echo "[2/3] Starting screen capture (accept the dialog) …"
+# ---- Find gamescope's own pipewire video source ----
+# Gamescope creates a Video/Source node named "gamescope" when running
+# nested.  No portal dialog needed.
+echo "[2/3] Finding gamescope pipewire node …"
 PWNODE=""
-python3 "$SCRIPT_DIR/start_screencast.py" > /tmp/st_rnn_node 2>/tmp/st_rnn_err || true
-PWNODE=$(cat /tmp/st_rnn_node 2>/dev/null)
-if [ -n "$PWNODE" ]; then
-    echo "  pipewire node: $PWNODE"
-else
-    echo "  WARNING: screencast failed"
-    echo "  stderr: $(head -c 200 /tmp/st_rnn_err 2>/dev/null)"
-    PWNODE=""
-fi
+for i in $(seq 1 15); do
+    PWNODE=$(pw-cli list-objects 2>/dev/null | awk '
+        /node.name = "gamescope"/ { innode=1; next }
+        innode && /^[[:space:]]*id [0-9]+, type.*Node/ {
+            gsub(/,/,""); print $2; exit
+        }')
+    [ -n "$PWNODE" ] && break
+    sleep 1
+done
 
-# ---- Video (gstreamer pipewiresrc → openh264) + Audio (ffmpeg pulse) ----
+if [ -z "$PWNODE" ]; then
+    echo "  ERROR: gamescope pipewire node not found"
+    exit 1
+fi
+echo "  node: $PWNODE"
+
+# ---- Video (gstreamer pipewiresrc) + Audio (ffmpeg pulse) ----
 echo "[3/3] Recording …"
 
-# Audio: ffmpeg pulse input (reliable 16kHz u8 resampling)
 ffmpeg -y -v warning \
     -f pulse -i default \
     -vn -c:a pcm_u8 -ar 16000 -ac 1 \
@@ -79,24 +86,21 @@ ffmpeg -y -v warning \
     2>/tmp/st_rnn_audio_err &
 AUDIO_PID=$!
 
-if [ -n "$PWNODE" ]; then
-    echo "  Capturing video from node $PWNODE"
-    gst-launch-1.0 -e \
-        pipewiresrc path="$PWNODE" \
-        ! videoconvert \
-        ! videoscale \
-        ! video/x-raw,width=128,height=128,format=GRAY8 \
-        ! jpegenc quality=92 \
-        ! jpegparse \
-        ! matroskamux \
-        ! filesink location="$OUT_DIR/video.mkv" \
-        2>/tmp/st_rnn_gst_err &
-    GST_PID=$!
-    sleep 1
-    if ! kill -0 $GST_PID 2>/dev/null; then
-        echo "  ERROR: gstreamer died"
-        head -c 300 /tmp/st_rnn_gst_err
-    fi
+gst-launch-1.0 -e \
+    pipewiresrc path="$PWNODE" \
+    ! videoconvert \
+    ! videoscale \
+    ! video/x-raw,width=128,height=128,format=GRAY8 \
+    ! jpegenc quality=92 \
+    ! jpegparse \
+    ! matroskamux \
+    ! filesink location="$OUT_DIR/video.mkv" \
+    2>/tmp/st_rnn_gst_err &
+GST_PID=$!
+sleep 1
+if ! kill -0 $GST_PID 2>/dev/null; then
+    echo "  ERROR: gstreamer died"
+    head -c 300 /tmp/st_rnn_gst_err
 fi
 
 # ---- Wait ----
