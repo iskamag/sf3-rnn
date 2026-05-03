@@ -79,22 +79,27 @@ AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
-    # pipewiresrc → videoconvertscale (handles DMA-BUF) →
-    # resize+gray → openh264enc → mkv (no raw pipe, no stride bugs)
+    # pipewiresrc → videoconvertscale → resize gray → y4menc →
+    # pipe to ffmpeg → ffv1 (lossless intra-frame) → mkv
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
-        ! jpegenc quality=85 \
-        ! jpegparse \
-        ! matroskamux \
-        ! filesink location="$OUT_DIR/video.mkv" \
-        2>/tmp/st_rnn_gst_err &
+        ! y4menc \
+        ! fdsink fd=1 \
+        2>/tmp/st_rnn_gst_err \
+        | ffmpeg -y -v warning \
+            -f yuv4mpegpipe -i - \
+            -c:v ffv1 -level 1 -pix_fmt gray \
+            -an \
+            "$OUT_DIR/video.mkv" \
+        2>/tmp/st_rnn_ffmpeg_err &
     VID_PID=$!
     sleep 1
     if ! kill -0 $VID_PID 2>/dev/null; then
         echo "  ERROR: capture process died immediately"
         echo "  gst: $(head -c 300 /tmp/st_rnn_gst_err 2>/dev/null)"
+        echo "  ffmpeg: $(head -c 300 /tmp/st_rnn_ffmpeg_err 2>/dev/null)"
         VID_PID=""
     fi
 fi
