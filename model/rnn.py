@@ -1,12 +1,11 @@
-"""CNN + Audio → LSTM policy model for SF3.
+"""CNN + (optional) Audio → LSTM policy model for SF3.
 
 Visual:  optical flow (2-ch) → FlowCNN → feature_dim
-Audio:   MFCC + energy features  → AudioMLP → audio_dim
+Audio:   MFCC + energy features  → AudioMLP → audio_dim      (if use_audio)
 Fused:   concat(visual, audio)   → LSTM → movement / buttons / value
 
-Audio features are always expected.  During BC training (no audio capture)
-they are filled with zeros; the model learns to rely on visual features
-primarily, and audio becomes additive during PPO / inference.
+When *use_audio* is False the audio encoder is absent; the LSTM takes
+only visual features.  No silent zero-fallback — the caller must match.
 """
 
 from __future__ import annotations
@@ -72,22 +71,30 @@ class _AudioEncoder(nn.Module):
 class SF3RNN(nn.Module):
     def __init__(self,
                  feature_dim: int = 256,
+                 use_audio: bool = True,
                  audio_dim: int = 64,
+                 audio_feat_dim: int = 15,
                  lstm_hidden: int = 512,
                  lstm_layers: int = 2,
                  lstm_dropout: float = 0.1,
                  num_directions: int = 9,
                  num_buttons: int = 6,
-                 audio_feat_dim: int = 15,
                  ):
         super().__init__()
         self.lstm_hidden = lstm_hidden
         self.lstm_layers = lstm_layers
+        self.use_audio = use_audio
 
         self.encoder = _FlowEncoder(feature_dim)
-        self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
 
-        self.lstm = nn.LSTM(feature_dim + audio_dim, lstm_hidden,
+        if use_audio:
+            self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
+            lstm_input = feature_dim + audio_dim
+        else:
+            self.audio_encoder = None
+            lstm_input = feature_dim
+
+        self.lstm = nn.LSTM(lstm_input, lstm_hidden,
                             num_layers=lstm_layers,
                             dropout=lstm_dropout,
                             batch_first=True)
@@ -115,16 +122,20 @@ class SF3RNN(nn.Module):
                 hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
                 audio: Optional[torch.Tensor] = None,          # (B, T, 15) or None
                 ) -> Dict[str, torch.Tensor]:
+        """One LSTM step per optical-flow frame.
+
+        *audio* is required when *use_audio* is True, ignored otherwise.
+        """
         vis = self.encoder(flows)                             # (B, T, F)
 
-        if audio is not None:
+        if self.use_audio:
+            if audio is None:
+                raise ValueError(
+                    "use_audio=True but no audio tensor passed to forward()")
             aud = self.audio_encoder(audio)                   # (B, T, A)
             feats = torch.cat([vis, aud], dim=-1)              # (B, T, F+A)
         else:
-            B, T = vis.shape[:2]
-            zeros = torch.zeros(B, T, self.audio_encoder.net[-1].out_features,
-                                device=vis.device, dtype=vis.dtype)
-            feats = torch.cat([vis, zeros], dim=-1)
+            feats = vis
 
         lstm_out, h = self.lstm(feats, hidden)
 

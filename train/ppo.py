@@ -29,11 +29,12 @@ class RolloutBuffer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+        self.use_audio = cfg.use_audio
         self.reset()
 
     def reset(self):
         self.flows: list[torch.Tensor] = []           # each (2, H, W) on CPU
-        self.audios: list[torch.Tensor] = []           # each (15,) on CPU
+        self.audios: list[torch.Tensor] = []           # each (15,) on CPU  (if use_audio)
         self.movements: list[int] = []
         self.button_masks: list[torch.Tensor] = []    # each (6,) float
         self.log_probs: list[torch.Tensor] = []       # scalar
@@ -41,12 +42,14 @@ class RolloutBuffer:
         self.rewards: list[float] = []
         self.dones: list[bool] = []
 
-    def add(self, flow: torch.Tensor, audio_feats: torch.Tensor,
-            movement: int, buttons: torch.Tensor,
+    def add(self, flow: torch.Tensor, movement: int, buttons: torch.Tensor,
             log_prob: torch.Tensor, value: torch.Tensor,
-            reward: float, done: bool):
+            reward: float, done: bool,
+            audio_feats: torch.Tensor | None = None):
         self.flows.append(flow.squeeze(0).squeeze(0).cpu())
-        self.audios.append(audio_feats.cpu())
+        if self.use_audio:
+            assert audio_feats is not None, "use_audio=True but no audio_feats in buffer.add()"
+            self.audios.append(audio_feats.cpu())
         self.movements.append(movement)
         self.button_masks.append(buttons.cpu())
         self.log_probs.append(log_prob.detach().cpu())
@@ -55,9 +58,8 @@ class RolloutBuffer:
         self.dones.append(done)
 
     def get_batch(self, device: torch.device) -> dict[str, torch.Tensor]:
-        return {
+        batch = {
             "flows":         torch.stack(self.flows).to(device),
-            "audio":         torch.stack(self.audios).to(device),              # (T, 15)
             "movement":      torch.tensor(self.movements, dtype=torch.long, device=device),
             "buttons":       torch.stack(self.button_masks).to(device),
             "old_log_probs": torch.stack(self.log_probs).to(device),
@@ -65,6 +67,9 @@ class RolloutBuffer:
             "rewards":       torch.tensor(self.rewards, dtype=torch.float32, device=device),
             "dones":         torch.tensor(self.dones, dtype=torch.bool, device=device),
         }
+        if self.use_audio:
+            batch["audio"] = torch.stack(self.audios).to(device)
+        return batch
 
     def __len__(self) -> int:
         return len(self.rewards)
@@ -80,6 +85,7 @@ class PPOTrainer:
 
         self.model = SF3RNN(
             feature_dim=cfg.feature_dim,
+            use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers,
@@ -107,9 +113,10 @@ class PPOTrainer:
         cfg = self.cfg
 
         # ---- Run model over the full episode ----
-        # flows: (T, 2, H, W), audio: (T, 15) → add batch dim → (1, T, …)
-        out = self.model(batch["flows"].unsqueeze(0),
-                         audio=batch["audio"].unsqueeze(0))
+        kw = {}
+        if cfg.use_audio:
+            kw["audio"] = batch["audio"].unsqueeze(0)
+        out = self.model(batch["flows"].unsqueeze(0), **kw)
         new_mov = out["movement"].squeeze(0)          # (T, 9)
         new_btn = out["buttons"].squeeze(0)           # (T, 6)
         new_val = out["value"].squeeze(0)             # (T,)

@@ -35,7 +35,7 @@ def collect_episode(env: SF3Env,
                     model: SF3RNN,
                     trainer: PPOTrainer,
                     sensory_buf: ReactionBuffer,
-                    audio_buf: AudioBuffer,
+                    audio_buf: AudioBuffer | None,
                     motor_buf: OutputDelayBuffer,
                     cfg: Config,
                     max_steps: int = 3600,
@@ -67,8 +67,8 @@ def collect_episode(env: SF3Env,
             sensory_buf.add_frame(frame)
             continue
 
-        # ---- LSTM forward (sensory-delayed flow + audio) ----
-        audio_feats = audio_buf.get_features()
+        # ---- LSTM forward ----
+        audio_feats = audio_buf.get_features() if audio_buf is not None else None
         with torch.no_grad():
             actions, hidden = model.step(flow, model.hidden,
                                          audio_feats=audio_feats)
@@ -119,13 +119,16 @@ def collect_episode(env: SF3Env,
         decision_flow = sensory_buf.get_flow_at(cfg.total_delay_frames)
         if decision_flow is None:
             decision_flow = flow
-        af = audio_feats.squeeze(0) if audio_feats is not None \
-            else torch.zeros(cfg.audio_feat_dim)
+
+        kwargs = {}
+        if cfg.use_audio:
+            kwargs["audio_feats"] = audio_feats.squeeze(0) if audio_feats is not None \
+                else torch.zeros(cfg.audio_feat_dim)
 
         trainer.buffer.add(
-            decision_flow, af, delayed.movement, delayed.buttons,
+            decision_flow, delayed.movement, delayed.buttons,
             delayed.log_prob.to(device), delayed.value.to(device),
-            reward, done,
+            reward, done, **kwargs,
         )
 
         total_reward += reward
@@ -157,17 +160,16 @@ def main():
         device=str(device))
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
 
-    audio_buf = AudioBuffer(
-        audio_lag=cfg.audio_lag_frames,
-        sample_rate=cfg.audio_sample_rate,
-        feat_dim=cfg.audio_feat_dim,
-        device=str(device))
-    audio_cap: AudioCapture | AudioCaptureStub
+    audio_buf: AudioBuffer | None = None
+    audio_cap: AudioCapture | AudioCaptureStub = AudioCaptureStub()
     if cfg.use_audio:
+        audio_buf = AudioBuffer(
+            audio_lag=cfg.audio_lag_frames,
+            sample_rate=cfg.audio_sample_rate,
+            feat_dim=cfg.audio_feat_dim,
+            device=str(device))
         audio_cap = AudioCapture(callback=audio_buf.add_samples,
                                  sample_rate=cfg.audio_sample_rate)
-    else:
-        audio_cap = AudioCaptureStub()
     audio_cap.start()
 
     total_steps = 0

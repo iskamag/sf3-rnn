@@ -49,6 +49,7 @@ class BCTrainer:
 
         self.model = SF3RNN(
             feature_dim=cfg.feature_dim,
+            use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers,
@@ -67,7 +68,8 @@ class BCTrainer:
             self._load(resume)
 
         self.dataset = ReplayDataset(
-            cfg.processed_dir, cfg.seq_len, cfg.total_delay_frames)
+            cfg.processed_dir, cfg.seq_len, cfg.total_delay_frames,
+            use_audio=cfg.use_audio)
         self.loader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=True,
             num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
@@ -86,9 +88,12 @@ class BCTrainer:
                 flows = batch["flows"].to(self.device, non_blocking=True)
                 movement = batch["movement"].to(self.device, non_blocking=True)
                 buttons = batch["buttons"].to(self.device, non_blocking=True)
-                audio = batch["audio"].to(self.device, non_blocking=True)
 
-                out = self.model(flows, audio=audio)
+                kwargs = {}
+                if cfg.use_audio:
+                    kwargs["audio"] = batch["audio"].to(self.device, non_blocking=True)
+
+                out = self.model(flows, **kwargs)
                 loss = bc_loss(out, {"movement": movement, "buttons": buttons})
 
                 self.optim.zero_grad(set_to_none=True)

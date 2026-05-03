@@ -6,6 +6,7 @@ Each .npz file contains:
   buttons    (T, 6)      float32   — button states {0, 1}
   health_p1  (T,)        float32   — P1 health 0-1
   health_p2  (T,)        float32   — P2 health 0-1
+  audio      (T, 15)     float32   — audio features (required if use_audio=True)
 
 The dataset yields sequences of *seq_len* flow frames where each LSTM
 timestep receives one flow frame.  The reaction-time delay is baked into
@@ -28,9 +29,11 @@ class ReplayDataset(Dataset):
                  data_dir: Path,
                  seq_len: int = 128,
                  total_delay: int = 12,
+                 use_audio: bool = True,
                  ):
         self.seq_len = seq_len
         self.total_delay = total_delay
+        self.use_audio = use_audio
 
         self.files = sorted(data_dir.glob("*.npz"))
         self._index: List[Tuple[int, int]] = []            # (file_idx, start)
@@ -78,10 +81,13 @@ class ReplayDataset(Dataset):
                 hp1 = hp2 = np.zeros(L, dtype=np.float32)
 
             af = data.get("audio", None)
-            if af is not None:
+            if self.use_audio:
+                if af is None:
+                    raise ValueError(
+                        f"use_audio=True but {self.files[fi].name} has no 'audio' array")
                 af = af[t0 : t0 + L].copy()
             else:
-                af = np.zeros((L, 15), dtype=np.float32)
+                af = np.zeros((L, 0), dtype=np.float32)   # empty tensor
 
         return {
             "flows":    torch.from_numpy(fs.astype(np.float32, copy=False)),

@@ -221,10 +221,16 @@ def main():
 
         # ---- audio features ----
         audio_feats = np.zeros((n_frames, cfg.audio_feat_dim), dtype=np.float32)
-        if audio_dir:
+        if cfg.use_audio:
+            if not audio_dir:
+                raise RuntimeError(
+                    "use_audio=True but --audio-dir (or --frames-dir) not set")
             wav = audio_dir / rp.stem / "audio.wav"
-            if wav.exists():
-                audio_feats = load_audio_features(wav, n_frames, cfg.audio_sample_rate)
+            if not wav.exists():
+                raise FileNotFoundError(
+                    f"use_audio=True but {wav} not found.  "
+                    "Record audio at 16 kHz mono during replay playback.")
+            audio_feats = load_audio_features(wav, n_frames, cfg.audio_sample_rate)
 
         # ---- actions ----
         movements = np.zeros(n_frames, dtype=np.int64)

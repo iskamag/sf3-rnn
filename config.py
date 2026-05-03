@@ -28,7 +28,10 @@ class Config:
         return self.sensory_lag_frames + self.motor_lag_frames
 
     # --- Audio ---
-    use_audio: bool = True           # capture & feed audio features
+    # Hard switch — when True the model always expects audio; the dataset
+    # MUST contain audio features and collection will error if audio.wav
+    # is missing.  When False the audio encoder is stripped entirely.
+    use_audio: bool = True
     audio_sample_rate: int = 16000
     audio_feat_dim: int = 15         # MFCC (13) + RMS (1) + centroid (1)
     audio_dim: int = 64              # internal embedding size

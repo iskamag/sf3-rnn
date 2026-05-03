@@ -43,7 +43,7 @@ def _parse_buttons(names: tuple[str, ...]) -> list[Button]:
 # ---------------------------------------------------------------------------
 def navigate_menu(env: MssScreenEnv,
                   sensory_buf: ReactionBuffer,
-                  audio_buf: AudioBuffer,
+                  audio_buf: AudioBuffer | None,
                   motor_buf: OutputDelayBuffer,
                   cfg: Config,
                   roi: dict,
@@ -124,6 +124,7 @@ def main():
 
     model = SF3RNN(
         feature_dim=cfg.feature_dim,
+        use_audio=cfg.use_audio,
         audio_dim=cfg.audio_dim,
         lstm_hidden=cfg.lstm_hidden,
         lstm_layers=cfg.lstm_layers,
@@ -145,17 +146,16 @@ def main():
         device=str(device))
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
 
-    audio_buf = AudioBuffer(
-        audio_lag=cfg.audio_lag_frames,
-        sample_rate=cfg.audio_sample_rate,
-        feat_dim=cfg.audio_feat_dim,
-        device=str(device))
-    audio_cap: AudioCapture | AudioCaptureStub
+    audio_buf: AudioBuffer | None = None
+    audio_cap: AudioCapture | AudioCaptureStub = AudioCaptureStub()
     if cfg.use_audio:
+        audio_buf = AudioBuffer(
+            audio_lag=cfg.audio_lag_frames,
+            sample_rate=cfg.audio_sample_rate,
+            feat_dim=cfg.audio_feat_dim,
+            device=str(device))
         audio_cap = AudioCapture(callback=audio_buf.add_samples,
                                  sample_rate=cfg.audio_sample_rate)
-    else:
-        audio_cap = AudioCaptureStub()
     audio_cap.start()
 
     sensory_buf.add_frame(frame)
@@ -195,7 +195,7 @@ def main():
             # ---- normal gameplay ----
             flow = sensory_buf.get_flow()
             if flow is not None:
-                audio_feats = audio_buf.get_features()
+                audio_feats = audio_buf.get_features() if audio_buf is not None else None
                 with torch.no_grad():
                     actions, hidden = model.step(flow, model.hidden,
                                                  audio_feats=audio_feats)
