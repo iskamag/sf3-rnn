@@ -24,15 +24,17 @@ mkdir -p "$OUT_DIR"
 
 EMU_PID=""
 GST_PID=""
+FFMPEG_PID=""
 AUDIO_PID=""
 _cleanup() {
     echo ""
     echo "Cleaning up …"
     [ -n "${GST_PID:-}" ] && kill $GST_PID 2>/dev/null || true
+    [ -n "${FFMPEG_PID:-}" ] && kill $FFMPEG_PID 2>/dev/null || true
     [ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
-    rm -f /tmp/st_rnn_y4m
+    rm -f /tmp/st_rnn_y4m /tmp/st_rnn_video
     if [ -f "$EMU_DIR/input_log.txt" ]; then
         cp "$EMU_DIR/input_log.txt" "$OUT_DIR/input_log.txt"
     fi
@@ -81,18 +83,32 @@ AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
-    # pipewiresrc → videoconvertscale → 128×128 gray →
-    # jpegenc (MJPEG, quality 92) → avimux → file
-    # MJPEG: fast encode/decode, intra-frame, real-time on one thread
+    mkfifo /tmp/st_rnn_video 2>/dev/null || true
+
+    # gstreamer: capture → resize to tightly-packed 128×128 GRAY8 → fifo
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
-        ! jpegenc quality=92 \
-        ! avimux \
-        ! filesink location="$OUT_DIR/video.avi" \
+        ! filesink location=/tmp/st_rnn_video \
         2>/tmp/st_rnn_gst_err &
     GST_PID=$!
+
+    # ffmpeg: read raw GRAY8 from fifo → MJPEG in AVI
+    ffmpeg -y -v warning \
+        -f rawvideo -pixel_format gray -video_size 128x128 -framerate 60 \
+        -i /tmp/st_rnn_video \
+        -c:v mjpeg -q:v 3 \
+        -an \
+        "$OUT_DIR/video.avi" \
+        2>/tmp/st_rnn_ffmpeg_err &
+    FFMPEG_PID=$!
+
+    sleep 1
+    if ! kill -0 $GST_PID 2>/dev/null; then
+        echo "  ERROR: gstreamer died"
+        head -c 300 /tmp/st_rnn_gst_err
+    fi
 fi
 
 # ---- Wait ----
