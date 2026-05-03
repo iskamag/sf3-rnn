@@ -87,7 +87,7 @@ ffmpeg -y -v warning \
     2>/tmp/st_rnn_audio_err &
 AUDIO_PID=$!
 
-gst-launch-1.0 -e \
+gst-launch-1.0 -ev \
     pipewiresrc path="$PWNODE" \
     ! videoconvert \
     ! videoscale \
