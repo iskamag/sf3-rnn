@@ -93,6 +93,7 @@ if [ -n "$PWNODE" ]; then
         ! filesink location="$OUT_DIR/video.avi" \
         2>/tmp/st_rnn_gst_err &
     GST_PID=$!
+fi
 
 # ---- Wait ----
 echo "Recording — press Ctrl+C when replay ends, or wait …"
