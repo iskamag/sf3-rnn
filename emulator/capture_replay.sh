@@ -82,7 +82,8 @@ AUDIO_PID=$!
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
     gst-launch-1.0 -e \
-        pipewiresrc path="$PWNODE" do-timestamp=true \
+        pipewiresrc path="$PWNODE" \
+        ! video/x-raw \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8,framerate=60/1 \
         ! jpegenc quality=92 \
