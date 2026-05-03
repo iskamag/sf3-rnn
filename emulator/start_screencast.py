@@ -50,16 +50,40 @@ def _on_response(response, results, path=None):
     elif PHASE == 2:                    # Start response — got streams
         streams = results.get("streams", [])
         print(f"Start response: {len(streams)} streams", file=sys.stderr)
+        # Stream struct varies by portal backend.  Try pipewire_node_id
+        # from properties, then fall back to scanning for new nodes.
         if streams:
             s = streams[0]
-            print(f"stream struct: id={s[0]} props={dict(s[1])}", file=sys.stderr)
-            props = s[1]
-            for k, v in props.items():
-                print(f"  {k} = {v!r}", file=sys.stderr)
-            # KDE uses "node_id" or "pipewire_node_id" depending on portal version
-            node = props.get("pipewire_node_id") or props.get("node_id")
-            if node:
-                PIPEWIRE_NODE = str(node)
+            # Try struct as (uint32, dict)
+            if len(s) >= 2 and isinstance(s[1], dict):
+                props = s[1]
+                node = props.get("pipewire_node_id") or props.get("node_id")
+                if node:
+                    PIPEWIRE_NODE = str(node)
+
+            if not PIPEWIRE_NODE:
+                # Try the first element as a node id directly
+                for elem in s:
+                    if isinstance(elem, (int, dbus.UInt32)):
+                        PIPEWIRE_NODE = str(int(elem))
+                        break
+
+        if not PIPEWIRE_NODE:
+            # Fallback: scan PipeWire for new video nodes
+            print("Scanning for pipewire video source …", file=sys.stderr)
+            import subprocess
+            out = subprocess.check_output(
+                ["pw-cli", "list-objects"], text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                if "node.name" in line and "kwin" in line.lower():
+                    print(f"  found: {line.strip()}", file=sys.stderr)
+            # Just try the first Video/Source we can find
+            import re
+            for match in re.finditer(
+                r'id (\d+),.*\n(?:.*\n)*?.*Video/(Source|Output)', out):
+                candidate = match.group(1)
+                print(f"  candidate node: {candidate}", file=sys.stderr)
+
         LOOP.quit()
 
 
