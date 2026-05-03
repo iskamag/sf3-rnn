@@ -47,8 +47,8 @@ def _on_response(response, results, path=None):
     elif PHASE == 2:                    # Start response — got streams
         streams = results.get("streams", [])
         if streams:
-            # stream is (id: str, type: uint, props: dict)
-            props = streams[0][2]
+            # struct is (uint32 stream_id, dict properties)
+            props = streams[0][1]
             node = props.get("pipewire_node_id")
             if node:
                 PIPEWIRE_NODE = str(node)
