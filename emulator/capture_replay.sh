@@ -77,6 +77,17 @@ if [ -z "$PWNODE" ]; then
 fi
 echo "  node: $PWNODE"
 
+# Wait for the emulator to actually start rendering (input_log.txt appears
+# when the Lua script runs, which happens after the replay connects)
+echo "  Waiting for replay to start …"
+for i in $(seq 1 60); do
+    if [ -f "$EMU_DIR/input_log.txt" ] && [ -s "$EMU_DIR/input_log.txt" ]; then
+        echo "  Replay started (frame $(wc -l < "$EMU_DIR/input_log.txt"))"
+        break
+    fi
+    sleep 1
+done
+
 # ---- Video (gstreamer pipewiresrc) + Audio (ffmpeg pulse) ----
 echo "[3/3] Recording …"
 
@@ -87,9 +98,11 @@ ffmpeg -y -v warning \
     2>/tmp/st_rnn_audio_err &
 AUDIO_PID=$!
 
-gst-launch-1.0 -ev \
-    pipewiresrc path="$PWNODE" \
+gst-launch-1.0 -e \
+    pipewiresrc path="$PWNODE" do-timestamp=true \
     ! videoconvert \
+    ! videorate \
+    ! video/x-raw,framerate=60/1 \
     ! videoscale \
     ! video/x-raw,width=128,height=128,format=GRAY8 \
     ! jpegenc quality=92 \
