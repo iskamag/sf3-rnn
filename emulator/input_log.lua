@@ -5,7 +5,10 @@
 --   <frame> <bits> <p1_hp> <p2_hp> <p1_stun> <p2_stun> <timer> <p1_wins> <p2_wins>
 
 local out = io.open("input_log.txt", "w")
-if not out then print("ERROR: cannot open input_log.txt") return end
+if not out then
+    print("ERROR: cannot open input_log.txt")
+    os.exit(1)
+end
 
 -- CPS3 memory addresses (sfiii3 / sfiii3nr1)
 local P1_HEALTH = 0x2068D0B
@@ -23,17 +26,17 @@ local function log_frame()
     -- Inputs
     local j = joypad.get()
     local bits = 0
-    if j["P1 Up"]        then bits = bits | (1 << 0) end
-    if j["P1 Down"]      then bits = bits | (1 << 1) end
-    if j["P1 Left"]      then bits = bits | (1 << 2) end
-    if j["P1 Right"]     then bits = bits | (1 << 3) end
-    if j["P1 Button 1"]  then bits = bits | (1 << 4) end
-    if j["P1 Button 2"]  then bits = bits | (1 << 5) end
-    if j["P1 Button 3"]  then bits = bits | (1 << 6) end
-    if j["P1 Button 4"]  then bits = bits | (1 << 7) end
-    if j["P1 Button 5"]  then bits = bits | (1 << 8) end
-    if j["P1 Button 6"]  then bits = bits | (1 << 9) end
-    if j["P1 Start"]     then bits = bits | (1 << 10) end
+    if j["P1 Up"]        then bits = bits + 1    end  -- bit 0
+    if j["P1 Down"]      then bits = bits + 2    end  -- bit 1
+    if j["P1 Left"]      then bits = bits + 4    end  -- bit 2
+    if j["P1 Right"]     then bits = bits + 8    end  -- bit 3
+    if j["P1 Button 1"]  then bits = bits + 16   end  -- bit 4  (LP)
+    if j["P1 Button 2"]  then bits = bits + 32   end  -- bit 5  (MP)
+    if j["P1 Button 3"]  then bits = bits + 64   end  -- bit 6  (HP)
+    if j["P1 Button 4"]  then bits = bits + 128  end  -- bit 7  (LK)
+    if j["P1 Button 5"]  then bits = bits + 256  end  -- bit 8  (MK)
+    if j["P1 Button 6"]  then bits = bits + 512  end  -- bit 9  (HK)
+    if j["P1 Start"]     then bits = bits + 1024 end  -- bit 10
 
     -- Game state from memory
     local p1_hp  = memory.readbyte(P1_HEALTH) / MAX_HEALTH
