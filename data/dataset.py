@@ -57,6 +57,12 @@ class ReplayDataset(Dataset):
         random.shuffle(self._index)
 
     # ------------------------------------------------------------------
+    def file_of(self, idx: int) -> Path:
+        """Return the .npz file that index *idx* belongs to."""
+        fi, _ = self._index[idx]
+        return self.files[fi]
+
+    # ------------------------------------------------------------------
     def __len__(self) -> int:
         return len(self._index)
 

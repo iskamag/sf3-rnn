@@ -7,5 +7,7 @@ checkpoints/
 logs/
 *.pt
 *.pth
-.npz
+*.npz
+*.zip
+*.tar.gz
 master/

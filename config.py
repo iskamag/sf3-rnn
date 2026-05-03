@@ -46,11 +46,17 @@ class Config:
 
     # --- Training ---
     batch_size: int = 32
-    seq_len: int = 128           # frames per training segment
+    seq_len: int = 128           # frames per training segment  (~2 s)
     lr: float = 1e-4
     weight_decay: float = 1e-5
     bc_epochs: int = 100
     num_workers: int = 4
+
+    # --- Match-context profiling ---
+    # A 64-d GRU that the LSTM reads & writes every frame.  Persists
+    # across BC segments (detached) and full PPO episodes, accumulating
+    # an opponent profile:  tendencies, habits, adaptation.
+    context_dim: int = 64
 
     # --- PPO fine-tuning ---
     ppo_clip_eps: float = 0.2

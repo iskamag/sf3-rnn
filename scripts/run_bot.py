@@ -126,6 +126,7 @@ def main():
         feature_dim=cfg.feature_dim,
         use_audio=cfg.use_audio,
         audio_dim=cfg.audio_dim,
+        context_dim=cfg.context_dim,
         lstm_hidden=cfg.lstm_hidden,
         lstm_layers=cfg.lstm_layers,
         lstm_dropout=cfg.lstm_dropout,

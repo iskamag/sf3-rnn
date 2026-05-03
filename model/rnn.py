@@ -1,11 +1,13 @@
-"""CNN + (optional) Audio → LSTM policy model for SF3.
+"""CNN + (optional) Audio + MatchContext → LSTM policy model for SF3.
 
-Visual:  optical flow (2-ch) → FlowCNN → feature_dim
-Audio:   MFCC + energy features  → AudioMLP → audio_dim      (if use_audio)
-Fused:   concat(visual, audio)   → LSTM → movement / buttons / value
+Visual:    optical flow (2-ch)  → FlowCNN      → feature_dim
+Audio:     MFCC + energy        → AudioMLP      → audio_dim    (if use_audio)
+Context:   LSTM output          → MatchContext  → context_dim  (persistent opponent profile)
+Fused:     concat(vis, aud, ctx)→ LSTM           → movement / buttons / value
 
-When *use_audio* is False the audio encoder is absent; the LSTM takes
-only visual features.  No silent zero-fallback — the caller must match.
+The match-context vector is a learned opponent profile that persists
+across BC training segments (detached at boundaries) and across the
+full episode during PPO.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from model.context import MatchContext
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +78,7 @@ class SF3RNN(nn.Module):
                  use_audio: bool = True,
                  audio_dim: int = 64,
                  audio_feat_dim: int = 15,
+                 context_dim: int = 64,
                  lstm_hidden: int = 512,
                  lstm_layers: int = 2,
                  lstm_dropout: float = 0.1,
@@ -84,15 +89,18 @@ class SF3RNN(nn.Module):
         self.lstm_hidden = lstm_hidden
         self.lstm_layers = lstm_layers
         self.use_audio = use_audio
+        self.context_dim = context_dim
 
         self.encoder = _FlowEncoder(feature_dim)
 
         if use_audio:
             self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
-            lstm_input = feature_dim + audio_dim
+            lstm_input = feature_dim + audio_dim + context_dim
         else:
             self.audio_encoder = None
-            lstm_input = feature_dim
+            lstm_input = feature_dim + context_dim
+
+        self.match_context = MatchContext(lstm_hidden, context_dim)
 
         self.lstm = nn.LSTM(lstm_input, lstm_hidden,
                             num_layers=lstm_layers,
@@ -111,21 +119,26 @@ class SF3RNN(nn.Module):
         )
 
         self.hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        self._context: Optional[torch.Tensor] = None          # (B, context_dim)
 
     # ------------------------------------------------------------------
     def reset_hidden(self):
         self.hidden = None
+        self._context = None
+
+    def detach_context(self):
+        """Detach the persistent context so gradients don't flow across
+        BC segment boundaries (the value itself survives)."""
+        if self._context is not None:
+            self._context = self._context.detach()
 
     # ------------------------------------------------------------------
     def forward(self,
                 flows: torch.Tensor,                          # (B, T, 2, H, W)
                 hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
                 audio: Optional[torch.Tensor] = None,          # (B, T, 15) or None
+                context: Optional[torch.Tensor] = None,         # (B, C) initial context
                 ) -> Dict[str, torch.Tensor]:
-        """One LSTM step per optical-flow frame.
-
-        *audio* is required when *use_audio* is True, ignored otherwise.
-        """
         vis = self.encoder(flows)                             # (B, T, F)
 
         if self.use_audio:
@@ -133,17 +146,36 @@ class SF3RNN(nn.Module):
                 raise ValueError(
                     "use_audio=True but no audio tensor passed to forward()")
             aud = self.audio_encoder(audio)                   # (B, T, A)
-            feats = torch.cat([vis, aud], dim=-1)              # (B, T, F+A)
-        else:
-            feats = vis
 
-        lstm_out, h = self.lstm(feats, hidden)
+        B, T = vis.shape[:2]
+        device = vis.device
+
+        if context is None:
+            ctx = self.match_context.initial_context(B, device)
+        else:
+            ctx = context
+
+        # Iterate over timesteps so the match context can be injected
+        lstm_outs = []
+        for t in range(T):
+            if self.use_audio:
+                step = torch.cat([vis[:, t], aud[:, t], ctx], dim=-1)
+            else:
+                step = torch.cat([vis[:, t], ctx], dim=-1)
+            step = step.unsqueeze(1)                          # (B, 1, F+A+C)
+
+            out, hidden = self.lstm(step, hidden)             # (B, 1, H)
+            ctx = self.match_context(out.squeeze(1), ctx)     # update profile
+            lstm_outs.append(out)
+
+        lstm_out = torch.cat(lstm_outs, dim=1)                 # (B, T, H)
 
         return {
             "movement": self.movement_head(lstm_out),
             "buttons":  self.button_head(lstm_out),
             "value":    self.value_head(lstm_out).squeeze(-1),
-            "hidden":   h,
+            "hidden":   hidden,
+            "context":  ctx,
         }
 
     # ------------------------------------------------------------------
@@ -155,8 +187,11 @@ class SF3RNN(nn.Module):
              ) -> Tuple[Dict[str, torch.Tensor],
                         Tuple[torch.Tensor, torch.Tensor]]:
         """Single-timestep inference.  *flow* and *audio_feats* are the
-        (separately delayed) sensory inputs."""
+        (separately delayed) sensory inputs.  The match context persists
+        across calls via self._context."""
         audio = audio_feats.unsqueeze(1) if audio_feats is not None else None
-        out = self.forward(flow, hidden=hidden, audio=audio)
+        out = self.forward(flow, hidden=hidden, audio=audio,
+                           context=self._context)
+        self._context = out["context"]
         actions = {k: out[k][:, -1] for k in ("movement", "buttons", "value")}
         return actions, (out["hidden"][0], out["hidden"][1])

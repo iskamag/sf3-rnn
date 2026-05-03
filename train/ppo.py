@@ -87,6 +87,7 @@ class PPOTrainer:
             feature_dim=cfg.feature_dim,
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
+            context_dim=cfg.context_dim,
             lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers,
             lstm_dropout=cfg.lstm_dropout,
@@ -116,7 +117,7 @@ class PPOTrainer:
         kw = {}
         if cfg.use_audio:
             kw["audio"] = batch["audio"].unsqueeze(0)
-        out = self.model(batch["flows"].unsqueeze(0), **kw)
+        out = self.model(batch["flows"].unsqueeze(0), context=None, **kw)
         new_mov = out["movement"].squeeze(0)          # (T, 9)
         new_btn = out["buttons"].squeeze(0)           # (T, 6)
         new_val = out["value"].squeeze(0)             # (T,)

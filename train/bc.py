@@ -51,6 +51,7 @@ class BCTrainer:
             feature_dim=cfg.feature_dim,
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
+            context_dim=cfg.context_dim,
             lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers,
             lstm_dropout=cfg.lstm_dropout,
@@ -71,7 +72,7 @@ class BCTrainer:
             cfg.processed_dir, cfg.seq_len, cfg.total_delay_frames,
             use_audio=cfg.use_audio)
         self.loader = DataLoader(
-            self.dataset, batch_size=cfg.batch_size, shuffle=True,
+            self.dataset, batch_size=cfg.batch_size, shuffle=False,
             num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
 
     # ------------------------------------------------------------------
@@ -80,11 +81,13 @@ class BCTrainer:
         for epoch in range(self.epoch, cfg.bc_epochs):
             self.epoch = epoch
             self.model.train()
+            self.model.reset_hidden()
             total_loss = 0.0
             t0 = time.time()
+            last_file = None
 
             pbar = tqdm(self.loader, desc=f"BC epoch {epoch+1}/{cfg.bc_epochs}")
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
                 flows = batch["flows"].to(self.device, non_blocking=True)
                 movement = batch["movement"].to(self.device, non_blocking=True)
                 buttons = batch["buttons"].to(self.device, non_blocking=True)
@@ -93,6 +96,14 @@ class BCTrainer:
                 if cfg.use_audio:
                     kwargs["audio"] = batch["audio"].to(self.device, non_blocking=True)
 
+                # Detect match boundary — reset context for new matches
+                idx = batch_idx * cfg.batch_size
+                if idx < len(self.dataset):
+                    cur_file = self.dataset.file_of(idx)
+                    if last_file is not None and cur_file != last_file:
+                        self.model.reset_hidden()
+                    last_file = cur_file
+
                 out = self.model(flows, **kwargs)
                 loss = bc_loss(out, {"movement": movement, "buttons": buttons})
 
@@ -100,6 +111,9 @@ class BCTrainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optim.step()
+
+                # Persist context for next segment, detach to block BPTT across segments
+                self.model.detach_context()
 
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
