@@ -23,14 +23,17 @@ export WINEPREFIX WINEDEBUG=-all
 mkdir -p "$OUT_DIR"
 
 EMU_PID=""
-VID_PID=""
+GST_PID=""
+FFMPEG_PID=""
 _cleanup() {
     echo ""
     echo "Cleaning up …"
-    [ -n "$VID_PID" ] && kill $VID_PID 2>/dev/null || true
+    [ -n "${GST_PID:-}" ] && kill $GST_PID 2>/dev/null || true
+    [ -n "${FFMPEG_PID:-}" ] && kill $FFMPEG_PID 2>/dev/null || true
     [ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
+    rm -f /tmp/st_rnn_y4m
     if [ -f "$EMU_DIR/input_log.txt" ]; then
         cp "$EMU_DIR/input_log.txt" "$OUT_DIR/input_log.txt"
     fi
@@ -79,27 +82,32 @@ AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
-    # pipewiresrc → videoconvertscale → resize gray → y4menc →
-    # pipe to ffmpeg → ffv1 (lossless intra-frame) → mkv
+    mkfifo /tmp/st_rnn_y4m 2>/dev/null || true
+
+    # gstreamer: capture → resize → gray → y4m → fifo
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
         ! y4menc \
-        ! fdsink fd=1 \
-        2>/tmp/st_rnn_gst_err \
-        | ffmpeg -y -v warning \
-            -f yuv4mpegpipe -i - \
-            -c:v ffv1 -level 1 -pix_fmt gray \
-            -an \
-            "$OUT_DIR/video.mkv" \
+        ! filesink location=/tmp/st_rnn_y4m \
+        2>/tmp/st_rnn_gst_err &
+    GST_PID=$!
+
+    # ffmpeg: read y4m from fifo → ffv1 → mkv
+    ffmpeg -y -v warning \
+        -f yuv4mpegpipe -i /tmp/st_rnn_y4m \
+        -c:v ffv1 -level 1 -pix_fmt gray \
+        -an \
+        "$OUT_DIR/video.mkv" \
         2>/tmp/st_rnn_ffmpeg_err &
-    VID_PID=$!
+    FFMPEG_PID=$!
+
+    VID_PID=$GST_PID
     sleep 1
-    if ! kill -0 $VID_PID 2>/dev/null; then
-        echo "  ERROR: capture process died immediately"
+    if ! kill -0 $GST_PID 2>/dev/null; then
+        echo "  ERROR: gstreamer died"
         echo "  gst: $(head -c 300 /tmp/st_rnn_gst_err 2>/dev/null)"
-        echo "  ffmpeg: $(head -c 300 /tmp/st_rnn_ffmpeg_err 2>/dev/null)"
         VID_PID=""
     fi
 fi
