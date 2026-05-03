@@ -48,7 +48,7 @@ rm -f "$EMU_DIR/input_log.txt"
 # ---- Launch emulator ----
 echo "[1/3] Launching emulator (gamescope) …"
 gamescope \
-    -W 640 -H 512 -r 60 \
+    -W 640 -H 524 -r 60 \
     -- wine "$EMU_DIR/fcadefbneo.exe" \
     "quark:stream,$GAME,$CHALLENGE_ID.2,7100" \
     -q -lua input_log.lua &
@@ -100,7 +100,7 @@ AUDIO_PID=$!
 
 gst-launch-1.0 -e \
     pipewiresrc path="$PWNODE" do-timestamp=true \
-    ! videocrop top=32 \
+    ! videocrop top=44 \
     ! videoconvert \
     ! videorate \
     ! video/x-raw,framerate=60/1 \
