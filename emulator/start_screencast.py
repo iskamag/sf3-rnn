@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Start a PipeWire screen-capture source via the desktop portal.
 
-Prints the PipeWire node ID for ffmpeg/pw-v4l2.
-If a dialog appears you must accept it within 30 s.
+Usage:  python3 start_screencast.py [token]
+Prints the PipeWire node ID to stdout for ffmpeg/pw-v4l2.
 """
 
 import sys
@@ -16,13 +16,13 @@ PORTAL = BUS.get_object("org.freedesktop.portal.Desktop",
                         "/org/freedesktop/portal/desktop")
 SC = dbus.Interface(PORTAL, "org.freedesktop.portal.ScreenCast")
 
-TOKEN = "st_rnn"
+TOKEN = sys.argv[1] if len(sys.argv) > 1 else "st_rnn"
 SESSION_HANDLE = None
 PIPEWIRE_NODE = None
 PHASE = 0
 
 
-def _on_response(response, results):
+def _on_response(response, results, path=None):
     global SESSION_HANDLE, PIPEWIRE_NODE, PHASE
 
     if response != 0:
