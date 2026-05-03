@@ -47,7 +47,9 @@ def _on_response(response, results, path=None):
     elif PHASE == 2:                    # Start response — got streams
         streams = results.get("streams", [])
         if streams:
-            node = streams[0].get("pipewire_node_id")
+            # stream is (id: str, type: uint, props: dict)
+            props = streams[0][2]
+            node = props.get("pipewire_node_id")
             if node:
                 PIPEWIRE_NODE = str(node)
         LOOP.quit()
