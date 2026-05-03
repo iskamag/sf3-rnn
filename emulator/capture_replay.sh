@@ -66,17 +66,10 @@ else
     PWNODE=""
 fi
 
-# ---- Video (gstreamer pipewiresrc → ffmpeg VAAPI) + Audio ----
+# ---- Video (gstreamer pipewiresrc → openh264) + Audio (ffmpeg pulse) ----
 echo "[3/3] Recording …"
 
-HWENC="libx264"
-HWOPT="-preset ultrafast -crf 23"
-if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_vaapi; then
-    HWENC="h264_vaapi"
-    HWOPT="-b:v 200k"
-fi
-
-# Audio: ffmpeg pulse input (reliable resampling)
+# Audio: ffmpeg pulse input (reliable 16kHz u8 resampling)
 ffmpeg -y -v warning \
     -f pulse -i default \
     -vn -c:a pcm_u8 -ar 16000 -ac 1 \
@@ -86,26 +79,22 @@ AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
-    # pipewiresrc produces DMA-BUF → videoconvertscale handles it →
-    # resize to 128×128 gray → pipe to ffmpeg for encoding
+    # pipewiresrc → videoconvertscale (handles DMA-BUF) →
+    # resize+gray → openh264enc → mkv (no raw pipe, no stride bugs)
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
         ! videoconvertscale \
         ! video/x-raw,width=128,height=128,format=GRAY8 \
-        ! fdsink fd=1 \
-        2>/tmp/st_rnn_gst_err \
-        | ffmpeg -y -v warning \
-            -f rawvideo -pixel_format gray -video_size 128x128 -framerate 60 -i - \
-            -c:v "$HWENC" $HWOPT \
-            -an \
-            "$OUT_DIR/video.mkv" \
-        2>/tmp/st_rnn_ffmpeg_err &
+        ! openh264enc \
+        ! h264parse \
+        ! matroskamux \
+        ! filesink location="$OUT_DIR/video.mkv" \
+        2>/tmp/st_rnn_gst_err &
     VID_PID=$!
     sleep 1
     if ! kill -0 $VID_PID 2>/dev/null; then
         echo "  ERROR: capture process died immediately"
         echo "  gst: $(head -c 300 /tmp/st_rnn_gst_err 2>/dev/null)"
-        echo "  ffmpeg: $(head -c 300 /tmp/st_rnn_ffmpeg_err 2>/dev/null)"
         VID_PID=""
     fi
 fi
