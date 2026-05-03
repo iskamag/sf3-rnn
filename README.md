@@ -18,7 +18,8 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │      ↓                                       ↓              │
 │  FlowCNN → 256-d                       AudioMLP → 64-d      │
 │      ↓                                       ↓              │
-│      └───────── concat ──── 320-d ──────────┘              │
+│      └───── concat ──── 320-d ──────────┘                  │
+│      └───── + MatchContext (64-d GRU) ───┘                  │
 │                        ↓                                    │
 │  2-layer LSTM (hidden=512)  ←  hidden state persistent      │
 │                        ↓                                    │
@@ -38,8 +39,7 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 - Motion patterns encode hit-stun, block-stun, knockdown, and spacing
 - 2-channel input is cheaper than RGB and more robust
 
-**Why two latency buffers?**
-Real human reaction time splits into:
+**Latency model** — split to match biological pipelines:
 
 | Pipeline stage              | Latency   | Frames  | Buffer              |
 |-----------------------------|-----------|---------|----------------------|
@@ -48,16 +48,18 @@ Real human reaction time splits into:
 | Motor  (nerves + muscle)    | ≈ 67 ms   | 4 frm   | `OutputDelayBuffer` |
 | **Total visual reaction**   | 200 ms    | 12 frm  | —                   |
 
-Audio reaches consciousness ~3× faster than vision, so it gets its own
-shorter-delay buffer.  The LSTM fuses both streams — visual flow (256-d)
-and acoustic features (64-d) — at each timestep.
+Audio reaches consciousness ~3× faster than vision; it gets its own shorter
+buffer.  The `MatchContext` (64-d GRU) accumulates an opponent profile across
+the full match from optical flow alone.
 
 ### Model detail
 
 - **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d
-- **LSTM**: 2 layers, hidden=512, dropout=0.1
-- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → MLP → 64-d, fused with visual by concatenation
+- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → MLP → 64-d
+- **LSTM**: 2 layers, hidden=512, dropout=0.1, input = 256 + 64 + 64 = 384-d
+- **MatchContext**: GRUCell(LSTM_out → 64-d), persisted across BC segments
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
+- **Value head**: scalar, for PPO
 
 ## Project layout
 
@@ -66,34 +68,30 @@ st-rnn/
 ├── config.py                  # All hyperparameters
 ├── model/
 │   ├── action_space.py        # Direction / Button enums, CPS3 bitfield codec
-│   ├── rnn.py                 # FlowCNN + AudioMLP → LSTM + value head
+│   ├── rnn.py                 # FlowCNN + AudioMLP + MatchContext → LSTM
+│   ├── context.py             # MatchContext GRU (opponent profiling)
 │   ├── reaction_buffer.py     # Visual sensory-lag frame buffer
-│   ├── audio_buffer.py        # Audio sensory-lag buffer (shorter delay)
+│   ├── audio_buffer.py        # Audio sensory-lag buffer
 │   └── output_buffer.py       # Motor-lag action buffer
 ├── vision/
 │   ├── optical_flow.py        # Farneback flow computation
-│   ├── audio_features.py      # MFCC + RMS + spectral centroid per frame
-│   └── game_state.py          # Health / stun / meter extraction + match splitting
+│   ├── audio_features.py      # MFCC + RMS + spectral centroid (256-pt FFT)
+│   └── game_state.py          # Match splitting from health signal
+├── emulator/
+│   ├── input_log.lua          # FBNeo Lua script — logs inputs + health
+│   ├── capture_replay.sh      # Launch + capture video/audio/inputs
+│   └── start_screencast.py    # XDG Desktop Portal screencast helper
 ├── data/
-│   └── dataset.py             # PyTorch Dataset (replay .npz files)
+│   └── dataset.py             # PyTorch Dataset (.npz files)
 ├── train/
 │   ├── bc.py                  # Behaviour cloning trainer
 │   ├── ppo.py                 # PPO trainer + rollout buffer
 │   └── reward.py              # Health-delta reward + GAE
-├── replay/
-│   └── parser.py              # Fightcade .fc2 replay parser
-├── env/
-│   ├── sf3_env.py             # Screen-capture / RetroArch environment
-│   └── audio_capture.py       # Background audio capture via sounddevice
-│   └── parser.py              # Fightcade .fc2 replay parser
-├── env/
-│   └── sf3_env.py             # Screen-capture / RetroArch environment
-├── scripts/
-│   ├── collect_data.py        # .fc2 → .npz pipeline
-│   ├── train_bc.py            # Run BC training
-│   ├── train_rl.py            # Run PPO fine-tuning
-│   └── run_bot.py             # Real-time inference
-└── requirements.txt
+└── scripts/
+    ├── collect_data.py        # Capture → .npz pipeline
+    ├── train_bc.py            # BC training entry point
+    ├── train_rl.py            # PPO fine-tuning entry point
+    └── run_bot.py             # Real-time inference
 ```
 
 ## Setup
@@ -105,48 +103,85 @@ pip install -r requirements.txt
 GPU recommended.  Optical flow runs on CPU via OpenCV (Farneback); model
 runs on CUDA.
 
-## 1. Collect training data
+## Guide: from replay to trained model
 
-### Option A — Fightcade replay files
+### 1. Prerequisites
 
-1. Obtain `.fc2` replays from Fightcade's replay library or your own matches.
-   Place them in `data/replays/`.
-2. Optionally capture frames during replay playback (e.g. with OBS or `mss`).
-3. Run the parser:
+You need the Fightcade emulator and the SF3 ROM.  The Fightcade Linux
+tarball (`Fightcade-linux-latest.tar.gz`) contains `emulator/fbneo/`.
 
-   ```bash
-   python scripts/collect_data.py --replay-dir data/replays --output-dir data/processed
-   ```
+```bash
+tar xf Fightcade-linux-latest.tar.gz
+mkdir -p ~/fightcade-emu
+cp -r Fightcade/emulator/fbneo/* ~/fightcade-emu/
+cp sfiii3nr1.zip ~/fightcade-emu/ROMs/
+```
 
-   This produces one `.npz` **per match** (character select, intros, and
-   victory screens are trimmed):
-   - `flows` — (T, 2, 128, 128) optical-flow frames
-   - `movement` — (T,) direction indices 0–8
-   - `buttons` — (T, 6) button states {0, 1}
-   - `health_p1`, `health_p2` — (T,) 0–1
+Also required: `wine`, `gamescope`, `ffmpeg` (with VAAPI), `pipewire`,
+`pw-v4l2`.
 
-   **Match splitting**: If pre-captured frames are available (`--frames-dir`),
-   the script detects health bars via HSV thresholding and trims replays
-   at character-select / menu boundaries.  Without frames it falls back to
-   a button-activity heuristic (menus have sparse inputs; gameplay has
-   frequent presses).
+### 2. Capture a replay
 
-### Option B — Live capture with inputs
+Pick a replay from [fightcade.com](https://www.fightcade.com/game/sfiii3nr1).
+Copy its URL — e.g. `https://replay.fightcade.com/fbneo/sfiii3nr1/1777806845400-9194`.
+The last segment (`1777806845400-9194`) is the challenge ID.
 
-Use `env/sf3_env.py` to capture frames while logging inputs from
-Fightcade's input display overlay (or via the emulator's Lua API).
+```bash
+./emulator/capture_replay.sh 1777806845400-9194
+```
 
-## 2. Behaviour cloning
+What happens:
+1. `gamescope` launches the emulator with `input_log.lua`
+2. A screencast dialog appears — **accept it**
+3. `pw-v4l2 ffmpeg` captures the gamescope window as 128×128 grayscale
+   H.264 video + 8-bit 16 kHz mono WAV audio
+4. The Lua script writes per-frame CPS3 bitfields + health/timer/wins
+   to `input_log.txt`
 
-Train the model to imitate human players:
+Output in `data/captures/1777806845400-9194/`:
+```
+video.mkv       — 128×128 grayscale, 60 fps, H.264 VAAPI
+audio.wav       — 8-bit mono 16 kHz PCM
+input_log.txt   — "frame bits p1hp p2hp timer p1wins p2wins" per line
+```
+
+Repeat for many replays — different players, characters, skill levels.
+Aim for at least 50–100 matches for BC training to be useful.
+
+### 3. Process into training data
+
+Converts the captures into `.npz` files the dataset can read.  Each `.npz`
+contains one match (character select / intros trimmed automatically via
+health-bar transitions).
+
+```bash
+python scripts/collect_data.py \
+    --capture-dir data/captures \
+    --output-dir data/processed
+```
+
+Output: `data/processed/<id>_match00.npz`, `..._match01.npz`, etc.
+
+Contents of each `.npz`:
+
+| Array        | Shape            | Description                       |
+|-------------|------------------|-----------------------------------|
+| `flows`     | (T, 2, 128, 128) | Farneback optical flow, normalised |
+| `movement`  | (T,)             | Direction index 0–8               |
+| `buttons`   | (T, 6)           | Button states {0, 1}              |
+| `health_p1` | (T,)             | P1 health 0–1 (from Lua memory)   |
+| `health_p2` | (T,)             | P2 health 0–1                     |
+| `audio`     | (T, 15)          | MFCC + energy features            |
+
+### 4. Behaviour cloning
+
+Trains the model to imitate the captured players.  The reaction-time
+delay is baked into the dataset: the model learns to map optical flow
+at time *t* to the action the human executed at time *t + total_delay*.
 
 ```bash
 python scripts/train_bc.py
 ```
-
-The dataset applies `total_delay_frames` (default 12) offset between
-input flows and target actions, baking the reaction-time constraint
-into the supervision signal.
 
 Resume from a checkpoint:
 
@@ -155,73 +190,62 @@ python scripts/train_bc.py --resume checkpoints/bc_epoch042.pt
 ```
 
 Loss: `CrossEntropy(movement) + BCEWithLogits(buttons)` summed over the
-full LSTM sequence.  Checkpoints saved to `checkpoints/bc_epochXXX.pt`.
+full LSTM sequence.  The MatchContext vector persists across segments
+from the same match (detached at boundaries) so the model learns to
+accumulate an opponent profile.
 
-## 3. PPO fine-tuning
+Checkpoints saved to `checkpoints/bc_epochXXX.pt`.
+Logs at `logs/bc/` (view with `tensorboard --logdir logs`).
 
-Fine-tune with self-play or environment interaction:
+### 5. PPO fine-tuning
+
+Fine-tune the BC policy with self-play or environment interaction.
+The reward is fully screen-observable — no emulator memory hooks needed.
 
 ```bash
 python scripts/train_rl.py --bc-ckpt checkpoints/bc_epoch099.pt
 ```
 
-The rollout uses the dual-buffer latency pipeline.  Each logged transition
-stores the flow from `total_delay_frames` ago, so the PPO update sees
-correctly aligned `(state, action, reward)` tuples.
-
-### Reward function
+**Reward function:**
 
 ```
-reward = health_delta * (damage_dealt - damage_taken)
+reward = health_delta * (damage_dealt − damage_taken)
        + round_win_bonus
        + match_win_bonus
-       - idle_penalty
+       − idle_penalty
 ```
 
-All components are computable from screen pixels (health bars, round
-indicators).  No game-internal memory access needed.
+The dual-buffer latency pipeline is active during rollout: visual lag
+8 frames, audio lag 3 frames, motor lag 4 frames.  Logged transitions
+use the total-delay flow so the PPO update sees correctly aligned
+`(state, action, reward)` tuples.
 
-## 4. Run the bot
+Checkpoints saved to `checkpoints/ppo_stepNNNNNN.pt`.
+Logs at `logs/ppo/`.
+
+### 6. Run the bot
 
 ```bash
 python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
 ```
 
-Requires a running SF3 instance (Fightcade or RetroArch).  Configure the
-screen-capture region in `env/sf3_env.py`.
+Requires a running SF3 instance.  The bot captures frames and audio,
+delays them through the reaction buffers, runs the LSTM, delays the
+output through the motor buffer, and injects inputs.
 
-Override latency parameters:
+Override latency:
 
 ```bash
 python scripts/run_bot.py --ckpt ... --sensory-lag 8 --motor-lag 4
 ```
 
-### Character select & menu navigation
-
-Between matches the bot watches for health-bar absence (`menu_detect_frames`
-config parameter).  When health bars disappear for long enough, it runs the
-`char_select_seq` from `config.py` — a hardcoded sequence of direction +
-button + hold-time tuples.  The default selects Ryu (cursor start position
-+ LP to confirm).
-
-```python
-# config.py
-char_select_seq: tuple = (
-    ("NEUTRAL",  (),        60),    # wait for screen to settle
-    ("NEUTRAL",  ("LP",),   10),    # confirm default character (Ryu)
-)
-```
-
-To pick a different character, extend the sequence with directional moves
-before the confirm step.  Direction/button names must match the enums in
-`model/action_space.py`.  Disable auto-navigation with `--no-menu-nav`.
-
-After navigation the LSTM hidden state and output buffer are reset, and
-the reaction buffer re-primes with gameplay frames.
+Between matches the bot detects character-select by watching for
+health-bar absence and navigates via `char_select_seq` in `config.py`.
+The LSTM hidden state and match context are reset at each new match.
 
 ## Configuration
 
-All tunables live in `config.py`.  Key ones:
+All tunables in `config.py`:
 
 | Parameter              | Default | Meaning                              |
 |------------------------|---------|--------------------------------------|
@@ -229,30 +253,19 @@ All tunables live in `config.py`.  Key ones:
 | `audio_lag_frames`     | 3       | Audio sensory delay (faster pathway) |
 | `motor_lag_frames`     | 4       | Motor/output delay (frames)          |
 | `total_delay_frames`   | 12      | Visual total ≈ 200 ms @ 60 fps       |
-| `use_audio`            | True    | Enable audio capture & features      |
-| `audio_dim`            | 64      | Internal audio embedding size        |
+| `use_audio`            | True    | Enable audio pipeline                |
+| `context_dim`          | 64      | MatchContext opponent-profile size   |
 | `feature_dim`          | 256     | Visual feature dimension             |
+| `audio_dim`            | 64      | Audio embedding dimension            |
 | `lstm_hidden`          | 512     | LSTM hidden size                     |
 | `lstm_layers`          | 2       | LSTM depth                           |
 | `seq_len`              | 128     | BC training segment length           |
 | `lr`                   | 1e-4    | Learning rate                        |
 | `ppo_clip_eps`         | 0.2     | PPO clip epsilon                     |
 
-Health-bar ROIs are native-resolution (384 × 224) bounding boxes.
-Calibrate with your specific capture setup.
+## CPS3 input bitfield
 
-## Fightcade replay format
-
-Fightcade 2 `.fc2` files are zlib-compressed JSON + CPS3 input bitfields.
-The parser (`replay/parser.py`) extracts:
-
-- Game metadata (players, characters)
-- Per-frame input bitfields (CPS3 format: bits 0–3 = directions, 4–9 = buttons)
-
-If parsing fails, convert to JSON first with
-[fc2json](https://github.com/eezstreet/fc2json) and pass the `.json` path.
-
-### CPS3 input bitfield
+The Lua script logs inputs in CPS3 format:
 
 ```
 bit 0 — Up          bit 4 — LP (jab)
@@ -267,10 +280,11 @@ bit 10 — Start
 ## Notes
 
 - The optical-flow CNN is a small custom architecture (not a pretrained
-  backbone) because flow fields are 2-channel and cheap to process.
-- Behaviour cloning trains on agnostic player data — the model learns
-  general SF3 competency, not to mimic a single player.
-- PPO reward is fully screen-observable.  No emulator memory hooks.
-- The ReactionBuffer forces the model to act on stale information;
-  the OutputDelayBuffer forces actions to wait before execution.
-  Together they impose the full ~200 ms human reaction pipeline.
+  backbone) — flow fields are 2-channel and cheap to process.
+- BC trains on diverse player data — the model learns general SF3
+  competency, not to mimic a single player.
+- PPO reward is fully screen-observable; the Lua script reads health
+  directly from CPS3 memory during capture, so no HUD extraction needed.
+- The MatchContext GRU gives the LSTM a persistent 64-d opponent profile
+  that survives BC segment boundaries and full PPO episodes.
+- Audio features use a manual 256-point DCT (no scipy dependency).
