@@ -28,6 +28,7 @@ _cleanup() {
     echo ""
     echo "Cleaning up …"
     [ -n "$VID_PID" ] && kill $VID_PID 2>/dev/null || true
+    [ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
     if [ -f "$EMU_DIR/input_log.txt" ]; then
@@ -75,20 +76,22 @@ if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_vaapi; then
     HWOPT="-b:v 200k"
 fi
 
-# Audio: simple pw-record
-pw-record --rate 16000 --channels 1 --format u8 \
-    "$OUT_DIR/audio.wav" &
+# Audio: ffmpeg pulse input (reliable resampling)
+ffmpeg -y -v warning \
+    -f pulse -i default \
+    -vn -c:a pcm_u8 -ar 16000 -ac 1 \
+    "$OUT_DIR/audio.wav" \
+    2>/tmp/st_rnn_audio_err &
 AUDIO_PID=$!
 
 if [ -n "$PWNODE" ]; then
     echo "  Capturing video from node $PWNODE"
-    # Gstreamer: pipewire → resize → gray → pipe to ffmpeg VAAPI
+    # pipewiresrc produces DMA-BUF → videoconvertscale handles it →
+    # resize to 128×128 gray → pipe to ffmpeg for encoding
     gst-launch-1.0 -e \
         pipewiresrc path="$PWNODE" \
-        ! videoscale \
-        ! video/x-raw,width=128,height=128 \
-        ! videoconvert \
-        ! video/x-raw,format=GRAY8 \
+        ! videoconvertscale \
+        ! video/x-raw,width=128,height=128,format=GRAY8 \
         ! fdsink fd=1 \
         2>/tmp/st_rnn_gst_err \
         | ffmpeg -y -v warning \
@@ -110,4 +113,3 @@ fi
 # ---- Wait ----
 echo "Recording — press Ctrl+C when replay ends, or wait …"
 wait $EMU_PID 2>/dev/null || true
-[ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
