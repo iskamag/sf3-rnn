@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Run a trained checkpoint in real time with dual-latency pipeline.
+
+    python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
+
+Pipeline:  camera → [sensory lag] → LSTM → [motor lag] → game input
+           ~100 ms              instant        ~100 ms
+
+Between matches the bot detects character-select / menus by watching
+for health-bar absence and navigates via a configurable sequence.
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import torch
+
+from config import Config
+from model.rnn import SF3RNN
+from model.action_space import decode_action, Direction, Button
+from model.reaction_buffer import ReactionBuffer
+from model.output_buffer import OutputDelayBuffer
+from vision.game_state import has_health_bar
+from env.sf3_env import MssScreenEnv
+
+
+# ---------------------------------------------------------------------------
+def _parse_direction(name: str) -> Direction:
+    return getattr(Direction, name.upper())
+
+
+def _parse_buttons(names: tuple[str, ...]) -> list[Button]:
+    return [getattr(Button, n.upper()) for n in names]
+
+
+# ---------------------------------------------------------------------------
+def navigate_menu(env: MssScreenEnv,
+                  sensory_buf: ReactionBuffer,
+                  motor_buf: OutputDelayBuffer,
+                  cfg: Config,
+                  roi: dict,
+                  ) -> int:
+    """Run the character-select sequence.  Returns the number of frames
+    spent navigating (for logging)."""
+
+    seq = cfg.char_select_seq
+    post_stall = cfg.post_match_stall
+    menu_detect = cfg.menu_detect_frames
+
+    # Stall briefly after match end
+    for _ in range(post_stall):
+        env.step(Direction.NEUTRAL, [])
+
+    health_seen_since = 0
+    frames_spent = post_stall
+
+    for direction_name, button_names, hold in seq:
+        d = _parse_direction(direction_name)
+        b = _parse_buttons(button_names)
+
+        for _ in range(hold):
+            frame, _, _, _ = env.step(d, b)
+            sensory_buf.add_frame(frame)
+            frames_spent += 1
+
+            if has_health_bar(frame, roi):
+                health_seen_since += 1
+            else:
+                health_seen_since = 0
+
+    # If health bars still absent, idle and poll until they return
+    safety = menu_detect
+    while safety > 0:
+        frame, _, _, _ = env.step(Direction.NEUTRAL, [])
+        sensory_buf.add_frame(frame)
+        frames_spent += 1
+
+        if has_health_bar(frame, roi):
+            health_seen_since += 1
+            if health_seen_since >= 6:          # stable for 6 consecutive frames
+                break
+        else:
+            health_seen_since = 0
+        safety -= 1
+
+    # Drain the output buffer (actions queued during menus are stale)
+    motor_buf._queue.clear()
+
+    return frames_spent
+
+
+# ---------------------------------------------------------------------------
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--ckpt", type=Path, required=True)
+    p.add_argument("--fps", type=int, default=60)
+    p.add_argument("--deterministic", action="store_true")
+    p.add_argument("--sensory-lag", type=int, default=None)
+    p.add_argument("--motor-lag", type=int, default=None)
+    p.add_argument("--no-menu-nav", action="store_true",
+                   help="Disable auto character-select (manual control)")
+    args = p.parse_args()
+
+    cfg = Config()
+    if args.sensory_lag is not None:
+        cfg.sensory_lag_frames = args.sensory_lag
+    if args.motor_lag is not None:
+        cfg.motor_lag_frames = args.motor_lag
+
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+
+    roi = {
+        "p1_health": cfg.p1_health_roi,
+        "p2_health": cfg.p2_health_roi,
+    }
+
+    model = SF3RNN(
+        feature_dim=cfg.feature_dim,
+        lstm_hidden=cfg.lstm_hidden,
+        lstm_layers=cfg.lstm_layers,
+        lstm_dropout=cfg.lstm_dropout,
+        num_directions=cfg.num_directions,
+        num_buttons=cfg.num_buttons,
+    ).to(device).eval()
+
+    ckpt = torch.load(args.ckpt, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    print(f"Loaded checkpoint (step {ckpt.get('step', '?')})")
+
+    env = MssScreenEnv(cfg)
+    frame = env.reset()
+
+    sensory_buf = ReactionBuffer(
+        sensory_lag=cfg.sensory_lag_frames,
+        frame_size=cfg.frame_size, flow_norm=cfg.flow_norm,
+        device=str(device))
+    motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
+
+    sensory_buf.add_frame(frame)
+    frame_ms = 1000.0 / args.fps
+    step = 0
+    actions_sent = 0
+
+    # Menu-detection state
+    health_absent = 0
+    navigations = 0
+
+    print(f"Running  (sensory={cfg.sensory_lag_frames}f  "
+          f"motor={cfg.motor_lag_frames}f  "
+          f"total={cfg.total_delay_frames}f).  Ctrl+C to stop.")
+    try:
+        while True:
+            loop_start = time.perf_counter()
+
+            # ---- menu detection ----
+            health_ok = has_health_bar(frame, roi)
+            if health_ok:
+                health_absent = 0
+            else:
+                health_absent += 1
+
+            if health_absent > cfg.menu_detect_frames and not args.no_menu_nav:
+                print(f"  [menu] navigating character select …")
+                spent = navigate_menu(env, sensory_buf, motor_buf, cfg, roi)
+                model.reset_hidden()
+                health_absent = 0
+                navigations += 1
+                print(f"  [menu] done — {spent} f spent, resuming")
+                frame, _, _, _ = env.step(Direction.NEUTRAL, [])
+                sensory_buf.add_frame(frame)
+                continue
+
+            # ---- normal gameplay ----
+            flow = sensory_buf.get_flow()
+            if flow is not None:
+                with torch.no_grad():
+                    actions, hidden = model.step(flow, model.hidden)
+                    model.hidden = hidden
+
+                if args.deterministic:
+                    direction, buttons = decode_action(
+                        actions["movement"], actions["buttons"], threshold=0.5)
+                    mov_dist = torch.distributions.Categorical(logits=actions["movement"])
+                    direction_int = int(direction)
+                    btn_probs = torch.sigmoid(actions["buttons"])
+                    btn_mask = (btn_probs > 0.5).float()
+                    log_prob = (mov_dist.log_prob(torch.tensor(direction_int, device=device)) +
+                                torch.distributions.Bernoulli(btn_probs).log_prob(btn_mask).sum())
+                else:
+                    mov_dist = torch.distributions.Categorical(logits=actions["movement"])
+                    direction_int = mov_dist.sample().item()
+                    btn_probs = torch.sigmoid(actions["buttons"])
+                    btn_dist = torch.distributions.Bernoulli(btn_probs)
+                    btn_mask = btn_dist.sample()
+                    log_prob = (mov_dist.log_prob(torch.tensor(direction_int, device=device)) +
+                                btn_dist.log_prob(btn_mask).sum())
+                    direction = Direction(direction_int)
+                    buttons = [Button(i) for i, v in enumerate(btn_mask) if v > 0.5]
+            else:
+                direction_int, btn_mask = Direction.NEUTRAL, torch.zeros(6)
+                log_prob, direction, buttons = torch.tensor(0.0), Direction.NEUTRAL, []
+
+            delayed = motor_buf.push(
+                direction_int, btn_mask,
+                log_prob.detach(),
+                actions["value"].detach() if flow is not None else torch.tensor(0.0),
+            )
+
+            if delayed is not None:
+                direction = Direction(delayed.movement)
+                buttons = [Button(i) for i, v in enumerate(delayed.buttons) if v > 0.5]
+                actions_sent += 1
+            else:
+                direction, buttons = Direction.NEUTRAL, []
+
+            frame, _, _, _ = env.step(direction, buttons)
+            sensory_buf.add_frame(frame)
+
+            step += 1
+            elapsed_ms = (time.perf_counter() - loop_start) * 1000
+            sleep_ms = max(0.0, frame_ms - elapsed_ms)
+            if sleep_ms > 0:
+                time.sleep(sleep_ms / 1000)
+
+            if step % 60 == 0:
+                btn_str = "+".join(b.name for b in buttons) if buttons else "--"
+                print(f"  step {step:5d}  {direction.name:14s}  [{btn_str}]  "
+                      f"loop={elapsed_ms:.1f}ms  sent={actions_sent}"
+                      f"  nav={navigations}")
+
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        env.close()
+
+
+if __name__ == "__main__":
+    main()

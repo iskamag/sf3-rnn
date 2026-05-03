@@ -1,0 +1,8 @@
+torch>=2.0
+torchvision>=0.15
+opencv-python>=4.8
+numpy>=1.24
+tqdm>=4.65
+gymnasium>=0.29
+tensorboard>=2.13
+psutil>=5.9

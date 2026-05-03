@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+data/processed/
+data/replays/
+checkpoints/
+logs/
+*.pt
+*.pth
+.npz
+master/
