@@ -42,10 +42,10 @@ shift
 
 case "$cmd" in
     bc)
-        python scripts/train_bc.py "$@"
+        python -m scripts.train_bc "$@"
         ;;
     bc-resume)
-        python scripts/train_bc.py --resume "$(latest_bc_checkpoint)" "$@"
+        python -m scripts.train_bc --resume "$(latest_bc_checkpoint)" "$@"
         ;;
     ppo)
         ckpt="${1:-}"
@@ -54,7 +54,7 @@ case "$cmd" in
         else
             ckpt="$(latest_bc_checkpoint)"
         fi
-        python scripts/train_rl.py --bc-ckpt "$ckpt" "$@"
+        python -m scripts.train_rl --bc-ckpt "$ckpt" "$@"
         ;;
     tensorboard|tb)
         tensorboard --logdir logs
