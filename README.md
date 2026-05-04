@@ -193,13 +193,13 @@ delay is baked into the dataset: the model learns to map optical flow
 at time *t* to the action the human executed at time *t + total_delay*.
 
 ```bash
-python scripts/train_bc.py
+./scripts/train.sh bc
 ```
 
 Resume from a checkpoint:
 
 ```bash
-python scripts/train_bc.py --resume checkpoints/bc_epoch042.pt
+./scripts/train.sh bc-resume
 ```
 
 Loss: `CrossEntropy(movement) + BCEWithLogits(buttons)` summed over the
@@ -216,7 +216,13 @@ Fine-tune the BC policy with self-play or environment interaction.
 The reward is fully screen-observable — no emulator memory hooks needed.
 
 ```bash
-python scripts/train_rl.py --bc-ckpt checkpoints/bc_epoch099.pt
+./scripts/train.sh ppo
+```
+
+Pass a specific BC checkpoint when needed:
+
+```bash
+./scripts/train.sh ppo checkpoints/bc_epoch099.pt
 ```
 
 **Reward function:**
@@ -235,6 +241,12 @@ use the total-delay flow so the PPO update sees correctly aligned
 
 Checkpoints saved to `checkpoints/ppo_stepNNNNNN.pt`.
 Logs at `logs/ppo/`.
+
+Start TensorBoard with:
+
+```bash
+./scripts/train.sh tensorboard
+```
 
 ### 6. Run the bot
 
