@@ -1,16 +1,12 @@
 """PyTorch Dataset for pre-processed SF3 replays.
 
-Each .npz file contains:
-  flows         (T, 2, H, W) float32  — optical-flow frames
-  movement      (T,)        int64     — P1 direction index 0-8
-  buttons       (T, 6)      float32   — P1 button states {0, 1}
-  p2_movement   (T,)        int64     — P2 direction index
-  p2_buttons    (T, 6)      float32   — P2 button states
-  health_p1     (T,)        float32   — P1 health 0-1
-  health_p2     (T,)        float32   — P2 health 0-1
-  stun_p1       (T,)        int32     — P1 hitstun {0, 1}
-  stun_p2       (T,)        int32     — P2 hitstun {0, 1}
-  audio         (T, 15)     float32   — audio features
+Preferred input is a shard directory from scripts/collect_data.py:
+  flow_u8.npy        (T-1, 2, H, W) uint8    — quantized optical-flow frames
+  audio_f16.npy      (T, 15)        float16  — per-video-frame audio features
+  movement_u8.npy    (T,)           uint8    — P1 direction index 0-8
+  buttons_u8.npy     (T, 6)         uint8    — P1 button states {0, 1}
+
+Legacy compressed .npz files remain supported for old processed data.
 
 The dataset randomly selects an ego player (P1 or P2) per sample and returns
 that player's actions as targets, with health/stun swapped for ego-consistency.
@@ -27,6 +23,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from data.shard import dequantize_flow
 
 
 class ReplayDataset(Dataset):
@@ -46,16 +44,24 @@ class ReplayDataset(Dataset):
         self.cache_size = max(0, cache_size)
         self._cache: OrderedDict[int, Dict[str, np.ndarray]] = OrderedDict()
 
-        self.files = sorted(data_dir.glob("*.npz"))
-        self._index: List[Tuple[int, int]] = []            # (file_idx, start)
+        shard_dirs = sorted(
+            p for p in data_dir.iterdir()
+            if p.is_dir() and (p / "flow_u8.npy").exists())
+        npz_files = sorted(data_dir.glob("*.npz"))
+        self.files = shard_dirs + npz_files
+        self._index: List[Tuple[int, int]] = []            # (source_idx, start)
 
         if not self.files:
-            raise FileNotFoundError(f"No .npz files in {data_dir}")
+            raise FileNotFoundError(f"No shard directories or .npz files in {data_dir}")
 
         for fi, fp in enumerate(self.files):
-            with np.load(fp) as d:
-                n_frames = d["movement"].shape[0]
-                n_flows = d["flows"].shape[0]
+            if fp.is_dir():
+                n_frames = np.load(fp / "movement_u8.npy", mmap_mode="r").shape[0]
+                n_flows = np.load(fp / "flow_u8.npy", mmap_mode="r").shape[0]
+            else:
+                with np.load(fp) as d:
+                    n_frames = d["movement"].shape[0]
+                    n_flows = d["flows"].shape[0]
 
             # We need *seq_len* flows + *total_delay* frame offset for targets
             min_len = seq_len + total_delay
@@ -83,8 +89,25 @@ class ReplayDataset(Dataset):
             self._cache.move_to_end(fi)
             return cached
 
-        with np.load(self.files[fi]) as data:
-            loaded = {k: data[k] for k in data.files}
+        fp = self.files[fi]
+        if fp.is_dir():
+            loaded = {
+                "_format": "shard",
+                "flow_u8": np.load(fp / "flow_u8.npy", mmap_mode="r"),
+                "audio": np.load(fp / "audio_f16.npy", mmap_mode="r"),
+                "movement": np.load(fp / "movement_u8.npy", mmap_mode="r"),
+                "buttons": np.load(fp / "buttons_u8.npy", mmap_mode="r"),
+                "p2_movement": np.load(fp / "p2_movement_u8.npy", mmap_mode="r"),
+                "p2_buttons": np.load(fp / "p2_buttons_u8.npy", mmap_mode="r"),
+                "health_p1": np.load(fp / "health_p1_u8.npy", mmap_mode="r"),
+                "health_p2": np.load(fp / "health_p2_u8.npy", mmap_mode="r"),
+                "stun_p1": np.load(fp / "stun_p1_u8.npy", mmap_mode="r"),
+                "stun_p2": np.load(fp / "stun_p2_u8.npy", mmap_mode="r"),
+            }
+        else:
+            with np.load(fp) as data:
+                loaded = {k: data[k] for k in data.files}
+                loaded["_format"] = "npz"
         self._cache[fi] = loaded
         if len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)
@@ -97,7 +120,10 @@ class ReplayDataset(Dataset):
         ego = random.randint(0, 1)  # 0 = P1, 1 = P2
 
         data = self._load_file(fi)
-        fs = data["flows"][start : start + L].copy()              # (L, 2, H, W)
+        if data["_format"] == "shard":
+            fs = dequantize_flow(data["flow_u8"][start : start + L])
+        else:
+            fs = data["flows"][start : start + L].copy()          # (L, 2, H, W)
 
         t0 = start + delay
         if ego == 0:
@@ -122,6 +148,9 @@ class ReplayDataset(Dataset):
                 hp1, hp2 = hp2[t0 : t0 + L].copy(), hp1[t0 : t0 + L].copy()
                 st1, st2 = (st2[t0 : t0 + L].copy() if st2 is not None else np.zeros(L, dtype=np.float32),
                             st1[t0 : t0 + L].copy() if st1 is not None else np.zeros(L, dtype=np.float32))
+            if data["_format"] == "shard":
+                hp1 = hp1.astype(np.float32) / 255.0
+                hp2 = hp2.astype(np.float32) / 255.0
         else:
             hp1 = hp2 = np.zeros(L, dtype=np.float32)
             st1 = st2 = np.zeros(L, dtype=np.float32)
@@ -131,7 +160,7 @@ class ReplayDataset(Dataset):
             if af is None:
                 raise ValueError(
                     f"use_audio=True but {self.files[fi].name} has no 'audio' array")
-            af = af[t0 : t0 + L].copy()
+            af = af[t0 : t0 + L].astype(np.float32, copy=True)
         else:
             af = np.zeros((L, 0), dtype=np.float32)
 

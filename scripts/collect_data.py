@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Convert preprocessed captures into training .npz files.
+"""Convert replay captures into mmap-friendly training shards.
 
 Each capture directory contains:
-  video.mkv      — 128×128 grayscale MJPEG, 60 fps
+  video.mkv      — native-resolution cache video, 60 fps
   audio.wav      — 8-bit mono 16 kHz PCM
   input_log.txt  — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 
@@ -19,10 +19,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
 from tqdm import tqdm
 
 from config import Config
+from data.shard import FLOW_MAX, FLOW_MIN, quantize_flow, write_json
 from model.action_space import bitfield_to_action
 from vision.optical_flow import compute_flow, preprocess_flow
 from vision.audio_features import extract_features
@@ -73,8 +73,8 @@ def load_audio_features(wav_path: Path, num_frames: int,
 
 
 # ---------------------------------------------------------------------------
-def load_video_frames(path: Path) -> np.ndarray | None:
-    """Read all frames as 128×128 uint8 greyscale."""
+def load_video_frames(path: Path, frame_size: int) -> np.ndarray | None:
+    """Read video frames as model-sized uint8 greyscale."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         return None
@@ -84,6 +84,7 @@ def load_video_frames(path: Path) -> np.ndarray | None:
         if not ret:
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (frame_size, frame_size), interpolation=cv2.INTER_AREA)
         frames.append(gray)
     cap.release()
     return np.stack(frames, axis=0) if frames else None
@@ -143,14 +144,14 @@ def parse_input_log(path: Path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-def save_match(output_dir: Path, stem: str, idx: int,
-               flows: np.ndarray, p1_mov: np.ndarray, p1_btn: np.ndarray,
-               p2_mov: np.ndarray, p2_btn: np.ndarray,
-               hp1: np.ndarray, hp2: np.ndarray,
-               stun1: np.ndarray, stun2: np.ndarray,
-               audio_feats: np.ndarray, start: int, end: int):
-    f_start = max(0, start - 1)
-    f_end = min(flows.shape[0], end)
+def save_match_npz(output_dir: Path, stem: str, idx: int,
+                   flows: np.ndarray, p1_mov: np.ndarray, p1_btn: np.ndarray,
+                   p2_mov: np.ndarray, p2_btn: np.ndarray,
+                   hp1: np.ndarray, hp2: np.ndarray,
+                   stun1: np.ndarray, stun2: np.ndarray,
+                   audio_feats: np.ndarray, start: int, end: int):
+    f_start = start
+    f_end = min(flows.shape[0], end - 1)
     out = output_dir / f"{stem}_match{idx:02d}.npz"
     np.savez_compressed(out,
         flows=flows[f_start:f_end],
@@ -166,11 +167,52 @@ def save_match(output_dir: Path, stem: str, idx: int,
     return out
 
 
+def save_match_shard(output_dir: Path, stem: str, idx: int,
+                     flows_u8: np.ndarray, p1_mov: np.ndarray, p1_btn: np.ndarray,
+                     p2_mov: np.ndarray, p2_btn: np.ndarray,
+                     hp1: np.ndarray, hp2: np.ndarray,
+                     stun1: np.ndarray, stun2: np.ndarray,
+                     audio_feats: np.ndarray, start: int, end: int,
+                     cfg: Config):
+    f_start = start
+    f_end = min(flows_u8.shape[0], end - 1)
+    out = output_dir / f"{stem}_match{idx:02d}"
+    out.mkdir(parents=True, exist_ok=True)
+
+    np.save(out / "flow_u8.npy", flows_u8[f_start:f_end])
+    np.save(out / "audio_f16.npy", audio_feats[start:end].astype(np.float16))
+    np.save(out / "movement_u8.npy", p1_mov[start:end].astype(np.uint8))
+    np.save(out / "buttons_u8.npy", p1_btn[start:end].astype(np.uint8))
+    np.save(out / "p2_movement_u8.npy", p2_mov[start:end].astype(np.uint8))
+    np.save(out / "p2_buttons_u8.npy", p2_btn[start:end].astype(np.uint8))
+    np.save(out / "health_p1_u8.npy", np.rint(np.clip(hp1[start:end], 0.0, 1.0) * 255).astype(np.uint8))
+    np.save(out / "health_p2_u8.npy", np.rint(np.clip(hp2[start:end], 0.0, 1.0) * 255).astype(np.uint8))
+    np.save(out / "stun_p1_u8.npy", stun1[start:end].astype(np.uint8))
+    np.save(out / "stun_p2_u8.npy", stun2[start:end].astype(np.uint8))
+    write_json(out / "meta.json", {
+        "format": "st-rnn-shard-v1",
+        "source_capture": stem,
+        "match_index": idx,
+        "start_frame": start,
+        "end_frame": end,
+        "num_frames": end - start,
+        "num_flows": f_end - f_start,
+        "fps": cfg.fps,
+        "frame_size": cfg.frame_size,
+        "flow_dtype": "uint8",
+        "flow_min": FLOW_MIN,
+        "flow_max": FLOW_MAX,
+        "audio_dtype": "float16",
+    })
+    return out
+
+
 # ---------------------------------------------------------------------------
 def main():
-    p = argparse.ArgumentParser(description="Convert captures to .npz training data")
+    p = argparse.ArgumentParser(description="Convert captures to training shards")
     p.add_argument("--capture-dir", type=Path, required=True)
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
+    p.add_argument("--format", choices=("shard", "npz"), default="shard")
     args = p.parse_args()
 
     cfg = Config()
@@ -203,16 +245,23 @@ def main():
             continue
 
         # ---- video → optical flow ----
-        frames = load_video_frames(video)
+        frames = load_video_frames(video, cfg.frame_size)
         if frames is None or len(frames) < 2:
             tqdm.write(f"  [skip] {d.name}: cannot read video")
             continue
 
         nf = min(len(frames) - 1, n_frames - 1)
-        flows_list = [preprocess_flow(compute_flow(frames[i], frames[i + 1]),
-                                      cfg.frame_size, cfg.flow_norm)
-                      for i in range(nf)]
-        flows = torch.stack(flows_list, dim=0).numpy()
+        if args.format == "shard":
+            flows = np.empty((nf, 2, cfg.frame_size, cfg.frame_size), dtype=np.uint8)
+            for i in range(nf):
+                flow = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
+                                       cfg.frame_size, cfg.flow_norm).numpy()
+                flows[i] = quantize_flow(flow)
+        else:
+            flows = np.empty((nf, 2, cfg.frame_size, cfg.frame_size), dtype=np.float32)
+            for i in range(nf):
+                flows[i] = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
+                                           cfg.frame_size, cfg.flow_norm).numpy()
 
         # ---- audio ----
         if audio.exists() and cfg.use_audio:
@@ -225,21 +274,30 @@ def main():
         signal = (hp1_raw > 0.05) & (hp2_raw > 0.05)
         boundaries = find_match_boundaries(signal)
         if not boundaries:
-            out = args.output_dir / f"{d.name}.npz"
-            np.savez_compressed(out, flows=flows,
-                                movement=p1_mov, buttons=p1_btn,
-                                p2_movement=p2_mov, p2_buttons=p2_btn,
-                                health_p1=hp1_raw, health_p2=hp2_raw,
-                                stun_p1=stun1, stun_p2=stun2,
-                                audio=audio_feats)
+            saver = save_match_shard if args.format == "shard" else save_match_npz
+            if args.format == "shard":
+                out = saver(args.output_dir, d.name, 0, flows, p1_mov, p1_btn,
+                            p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2,
+                            audio_feats, 0, n_frames, cfg)
+            else:
+                out = saver(args.output_dir, d.name, 0, flows, p1_mov, p1_btn,
+                            p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2,
+                            audio_feats, 0, n_frames)
             tqdm.write(f"  {out.name}  ({n_frames} f)")
             total_matches += 1
             continue
 
         for mi, (start, end) in enumerate(boundaries):
-            save_match(args.output_dir, d.name, mi,
-                       flows, p1_mov, p1_btn, p2_mov, p2_btn,
-                       hp1_raw, hp2_raw, stun1, stun2, audio_feats, start, end)
+            if args.format == "shard":
+                save_match_shard(args.output_dir, d.name, mi,
+                                 flows, p1_mov, p1_btn, p2_mov, p2_btn,
+                                 hp1_raw, hp2_raw, stun1, stun2, audio_feats,
+                                 start, end, cfg)
+            else:
+                save_match_npz(args.output_dir, d.name, mi,
+                               flows, p1_mov, p1_btn, p2_mov, p2_btn,
+                               hp1_raw, hp2_raw, stun1, stun2, audio_feats,
+                               start, end)
         total_matches += len(boundaries)
         tqdm.write(f"  {d.name} → {len(boundaries)} matches  ({n_frames} f)")
 
