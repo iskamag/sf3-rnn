@@ -100,12 +100,13 @@ st-rnn/
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+./scripts/setup_env.sh
+source .venv/bin/activate
 ```
 
-For CPU-only systems, install CPU PyTorch/torchvision first from the PyTorch CPU
-index, or use `pip install -r requirements-cpu.txt`, so latest
-`minGRU-pytorch` reuses CPU PyTorch instead of pulling CUDA wheels.
+The setup script creates `.venv/` and installs CPU-only PyTorch by default, so
+latest `minGRU-pytorch` does not pull CUDA wheels on CPU systems. For CUDA
+installs, run `./scripts/setup_env.sh cuda` instead.
 
 CPU works; CUDA is optional but recommended for training. Optical flow runs on
 CPU via OpenCV (Farneback).
