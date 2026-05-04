@@ -136,29 +136,6 @@ def parse_input_log(path: Path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-def save_match_npz(output_dir: Path, stem: str, idx: int,
-                   flows: np.ndarray, p1_mov: np.ndarray, p1_btn: np.ndarray,
-                   p2_mov: np.ndarray, p2_btn: np.ndarray,
-                   hp1: np.ndarray, hp2: np.ndarray,
-                   stun1: np.ndarray, stun2: np.ndarray,
-                   audio_feats: np.ndarray, start: int, end: int):
-    f_start = start
-    f_end = min(flows.shape[0], end - 1)
-    out = output_dir / f"{stem}_match{idx:03d}.npz"
-    np.savez_compressed(out,
-        flows=flows[f_start:f_end],
-        movement=p1_mov[start:end],
-        buttons=p1_btn[start:end],
-        p2_movement=p2_mov[start:end],
-        p2_buttons=p2_btn[start:end],
-        health_p1=hp1[start:end],
-        health_p2=hp2[start:end],
-        stun_p1=stun1[start:end],
-        stun_p2=stun2[start:end],
-        audio=audio_feats[start:end])
-    return out
-
-
 def save_match_shard(output_dir: Path, stem: str, idx: int,
                      flows_u8: np.ndarray, p1_mov: np.ndarray, p1_btn: np.ndarray,
                      p2_mov: np.ndarray, p2_btn: np.ndarray,
@@ -205,7 +182,6 @@ def main():
     p = argparse.ArgumentParser(description="Convert captures to training shards")
     p.add_argument("--capture-dir", type=Path, default=Path("data/captures"))
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
-    p.add_argument("--format", choices=("shard", "npz"), default="shard")
     args = p.parse_args()
 
     cfg = Config()
@@ -255,19 +231,12 @@ def main():
             continue
 
         nf = min(len(frames) - 1, n_frames - 1)
-        if args.format == "shard":
-            flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.uint8)
-            for i in range(nf):
-                flow = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
-                                       cfg.frame_width, cfg.frame_height,
-                                       cfg.flow_norm).numpy()
-                flows[i] = quantize_flow(flow)
-        else:
-            flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.float32)
-            for i in range(nf):
-                flows[i] = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
-                                           cfg.frame_width, cfg.frame_height,
-                                           cfg.flow_norm).numpy()
+        flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.uint8)
+        for i in range(nf):
+            flow = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
+                                   cfg.frame_width, cfg.frame_height,
+                                   cfg.flow_norm).numpy()
+            flows[i] = quantize_flow(flow)
 
         # ---- audio ----
         if audio.exists() and cfg.use_audio:
@@ -280,30 +249,18 @@ def main():
         signal = (hp1_raw > 0.05) & (hp2_raw > 0.05)
         boundaries = find_match_boundaries(signal)
         if not boundaries:
-            saver = save_match_shard if args.format == "shard" else save_match_npz
-            if args.format == "shard":
-                out = saver(args.output_dir, d.name, 0, flows, p1_mov, p1_btn,
-                            p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2,
-                            audio_feats, 0, n_frames, cfg)
-            else:
-                out = saver(args.output_dir, d.name, 0, flows, p1_mov, p1_btn,
-                            p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2,
-                            audio_feats, 0, n_frames)
+            out = save_match_shard(args.output_dir, d.name, 0, flows, p1_mov, p1_btn,
+                                   p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2,
+                                   audio_feats, 0, n_frames, cfg)
             tqdm.write(f"  {out.name}  ({n_frames} f)")
             total_matches += 1
             continue
 
         for mi, (start, end) in enumerate(boundaries):
-            if args.format == "shard":
-                save_match_shard(args.output_dir, d.name, mi,
-                                 flows, p1_mov, p1_btn, p2_mov, p2_btn,
-                                 hp1_raw, hp2_raw, stun1, stun2, audio_feats,
-                                 start, end, cfg)
-            else:
-                save_match_npz(args.output_dir, d.name, mi,
-                               flows, p1_mov, p1_btn, p2_mov, p2_btn,
-                               hp1_raw, hp2_raw, stun1, stun2, audio_feats,
-                               start, end)
+            save_match_shard(args.output_dir, d.name, mi,
+                             flows, p1_mov, p1_btn, p2_mov, p2_btn,
+                             hp1_raw, hp2_raw, stun1, stun2, audio_feats,
+                             start, end, cfg)
         total_matches += len(boundaries)
         tqdm.write(f"  {d.name} → {len(boundaries)} matches  ({n_frames} f)")
 

@@ -85,14 +85,14 @@ st-rnn/
 │   ├── capture_replay.sh      # Launch + capture video/audio/inputs
 │   └── start_screencast.py    # XDG Desktop Portal screencast helper
 ├── data/
-│   └── dataset.py             # PyTorch Dataset (.npz files)
+│   └── dataset.py             # PyTorch Dataset (shard directories)
 ├── train/
 │   ├── bc.py                  # Behaviour cloning trainer
 │   ├── ppo.py                 # PPO trainer + rollout buffer
 │   └── reward.py              # Health-delta reward + GAE
     └── scripts/
     ├── train.sh               # Unified CLI wrapper
-    ├── collect_data.py        # Capture → .npz pipeline
+    ├── collect_data.py        # Capture → shard pipeline
     ├── train_bc.py            # BC training entry point
     ├── train_rl.py            # PPO fine-tuning entry point
     └── run_bot.py             # Real-time inference
