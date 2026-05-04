@@ -11,6 +11,7 @@ usage: scripts/train.sh <command> [args]
 commands:
   bc [args...]          Run behavior cloning
   bc-resume [args...]   Resume behavior cloning from latest BC checkpoint
+  collect [args...]     Convert replay captures to training shards
   ppo [ckpt] [args...]  Run PPO, defaulting to latest BC checkpoint
   tensorboard           Start TensorBoard for logs/
 EOF
@@ -55,6 +56,9 @@ case "$cmd" in
             ckpt="$(latest_bc_checkpoint)"
         fi
         python -m scripts.train_rl --bc-ckpt "$ckpt" "$@"
+        ;;
+    collect)
+        python -m scripts.collect_data "$@"
         ;;
     tensorboard|tb)
         tensorboard --logdir logs

@@ -90,7 +90,8 @@ st-rnn/
 │   ├── bc.py                  # Behaviour cloning trainer
 │   ├── ppo.py                 # PPO trainer + rollout buffer
 │   └── reward.py              # Health-delta reward + GAE
-└── scripts/
+    └── scripts/
+    ├── train.sh               # Unified CLI wrapper
     ├── collect_data.py        # Capture → .npz pipeline
     ├── train_bc.py            # BC training entry point
     ├── train_rl.py            # PPO fine-tuning entry point
@@ -163,7 +164,7 @@ read. Each shard contains one match (character select / intros trimmed
 automatically via health-bar transitions).
 
 ```bash
-python scripts/collect_data.py \
+./scripts/train.sh collect \
     --capture-dir data/captures \
     --output-dir data/processed
 ```
