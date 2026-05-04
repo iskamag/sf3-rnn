@@ -9,11 +9,11 @@ This tracks the current state of the active `st-rnn` code after the cleanup pass
 - `emulator/bot_bridge.lua` reads `bot_input.txt`, applies P1 input through FBNeo Lua, and logs state in the same format as `input_log.lua`.
 - Replay capture still uses `emulator/input_log.lua`, which is appropriate for passive replay logging.
 - Model flow input is aspect-preserving `160x120`, not square and not power-of-two for its own sake.
-- Raw replay capture is cached as `640x480` lossless H.264 to avoid preprocessing from macroblocked 128px video while avoiding FFV1 decode cost.
-- Processed BC data uses mmap-friendly shard directories by default.
-- Shards store flow as clipped uint8 (`flow_u8.npy`) and audio features as float16 (`audio_f16.npy`). Legacy compressed `.npz` remains readable.
+- Raw replay capture is currently cached as `160x120` `GRAY8` `video.raw` from the PipeWire/GStreamer capture path.
+- Processed BC data uses mmap-friendly shard directories only.
+- Shards store flow as clipped uint8 (`flow_u8.npy`) and audio features as float16 (`audio_f16.npy`).
 - Audio keeps the 256-sample FFT window, but offline and real-time feature hops follow the 60 FPS video timeline to avoid drift.
-- `MatchContext` is opt-in. The default path uses zero context features and parallel minGRU-pytorch sequence execution.
+- `MatchContext` is always enabled. BC trains ordered match chunks, carrying minGRU hidden state and context across chunks so the model builds an opponent profile over the full match.
 - PPO uses recurrent chunks with detached chunk-start hidden states, honors `ppo_minibatch`, and can prioritize chunks by mean absolute advantage.
 
 ## Remaining Risks
