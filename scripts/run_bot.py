@@ -131,7 +131,6 @@ def main():
         mingru_dropout=cfg.mingru_dropout,
         num_directions=cfg.num_directions,
         num_buttons=cfg.num_buttons,
-        use_match_context=cfg.use_match_context,
     ).to(device).eval()
 
     ckpt = torch.load(args.ckpt, map_location=device)

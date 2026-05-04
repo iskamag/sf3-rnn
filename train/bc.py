@@ -7,13 +7,14 @@ target offset.  Loss: CE (movement) + BCE (buttons) summed over timesteps.
 
 from __future__ import annotations
 
+import random
 import time
 from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data._utils.collate import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -47,6 +48,8 @@ class BCTrainer:
     def __init__(self, cfg: Config, resume: Optional[Path] = None):
         self.cfg = cfg
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+        if self.device.type == "cuda":
+            torch.set_float32_matmul_precision("high")
 
         self.model = SF3RNN(
             feature_dim=cfg.feature_dim,
@@ -58,7 +61,6 @@ class BCTrainer:
             mingru_dropout=cfg.mingru_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
-            use_match_context=cfg.use_match_context,
         ).to(self.device)
 
         self.optim = make_muon_optimizer(
@@ -72,23 +74,22 @@ class BCTrainer:
 
         self.writer = SummaryWriter(cfg.log_dir / "bc")
         self.epoch = 0
+        self.use_amp = cfg.use_amp and self.device.type == "cuda"
+        self.amp_dtype = torch.float16 if cfg.amp_dtype == "float16" else torch.bfloat16
+        self.scaler = torch.amp.GradScaler(
+            "cuda", enabled=self.use_amp and self.amp_dtype == torch.float16)
 
         if resume is not None:
             self._load(resume)
 
+        if cfg.compile_model and self.device.type == "cuda":
+            self.model = torch.compile(self.model)
+
         self.dataset = ReplayDataset(
             cfg.processed_dir, cfg.seq_len, cfg.total_delay_frames,
-            use_audio=cfg.use_audio, segment_stride=cfg.segment_stride)
-        loader_kwargs = {
-            "batch_size": cfg.batch_size,
-            "shuffle": False,
-            "num_workers": cfg.num_workers,
-            "pin_memory": self.device.type == "cuda",
-            "drop_last": True,
-        }
-        if cfg.num_workers > 0:
-            loader_kwargs["prefetch_factor"] = 1
-        self.loader = DataLoader(self.dataset, **loader_kwargs)
+            audio_offset=cfg.total_delay_frames - (cfg.audio_lag_frames + cfg.motor_lag_frames),
+            use_audio=cfg.use_audio, segment_stride=cfg.segment_stride,
+            cache_size=max(2, cfg.batch_size))
 
     # ------------------------------------------------------------------
     def run(self):
@@ -96,61 +97,106 @@ class BCTrainer:
         for epoch in range(self.epoch, cfg.bc_epochs):
             self.epoch = epoch
             self.model.train()
-            self.model.reset_hidden()
             total_loss = 0.0
+            total_chunks = 0
             t0 = time.time()
-            last_file = None
 
-            pbar = tqdm(self.loader, desc=f"BC epoch {epoch+1}/{cfg.bc_epochs}")
-            for batch_idx, batch in enumerate(pbar):
-                flows = batch["flows"].to(self.device, non_blocking=True)
-                movement = batch["movement"].to(self.device, non_blocking=True)
-                buttons = batch["buttons"].to(self.device, non_blocking=True)
+            sources = [
+                fi for fi in range(self.dataset.num_sources())
+                if self.dataset.sequences_for_file(fi)
+            ]
+            random.shuffle(sources)
+            progress_total = sum(
+                len(self.dataset.sequences_for_file(fi)) for fi in sources)
+            pbar = tqdm(total=progress_total,
+                        desc=f"BC epoch {epoch+1}/{cfg.bc_epochs}")
 
-                kwargs = {}
-                ego = batch["ego_player"]
-                if isinstance(ego, torch.Tensor):
-                    ego = ego.to(self.device, dtype=torch.float32).unsqueeze(1)
-                else:
-                    ego = torch.tensor(ego, device=self.device,
-                                       dtype=torch.float32).view(-1, 1)
-                if cfg.use_audio:
-                    kwargs["audio"] = batch["audio"].to(self.device, non_blocking=True)
+            for group_start in range(0, len(sources), cfg.batch_size):
+                group = sources[group_start:group_start + cfg.batch_size]
+                seqs = [self.dataset.sequences_for_file(fi) for fi in group]
+                egos = [random.randint(0, 1) for _ in group]
+                hiddens: list[Optional[torch.Tensor]] = [None] * len(group)
+                contexts: list[Optional[torch.Tensor]] = [None] * len(group)
 
-                # Detect match boundary — reset context for new matches
-                idx = batch_idx * cfg.batch_size
-                if idx < len(self.dataset):
-                    cur_file = self.dataset.file_of(idx)
-                    if last_file is not None and cur_file != last_file:
-                        self.model.reset_hidden()
-                    last_file = cur_file
+                for step_idx in range(max(len(s) for s in seqs)):
+                    active = [i for i, s in enumerate(seqs) if step_idx < len(s)]
+                    samples = []
+                    for i in active:
+                        start, _ = seqs[i][step_idx]
+                        samples.append(self.dataset.get_sequence(group[i], start, egos[i]))
+                    batch = default_collate(samples)
 
-                out = self.model(flows, ego, **kwargs)
-                loss = bc_loss(out, {"movement": movement, "buttons": buttons})
+                    hidden = None
+                    if any(hiddens[i] is not None for i in active):
+                        hidden = torch.cat([hiddens[i] for i in active], dim=1)
 
-                self.optim.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                self.optim.step()
+                    context = None
+                    if any(contexts[i] is not None for i in active):
+                        context = torch.cat([contexts[i] for i in active], dim=0)
 
-                # Persist context for next segment, detach to block BPTT across segments
-                self.model.detach_context()
+                    loss, next_hidden, next_context = self._train_batch(
+                        batch, hidden, context)
 
-                total_loss += loss.item()
-                pbar.set_postfix(loss=f"{loss.item():.4f}")
+                    for col, i in enumerate(active):
+                        hiddens[i] = next_hidden[:, col:col + 1].detach()
+                        contexts[i] = next_context[col:col + 1].detach()
 
-            avg = total_loss / len(self.loader)
+                    batch_chunks = len(active)
+                    total_loss += loss.item() * batch_chunks
+                    total_chunks += batch_chunks
+                    pbar.update(batch_chunks)
+                    pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+            pbar.close()
+
+            avg = total_loss / max(1, total_chunks)
             self.writer.add_scalar("loss/train", avg, epoch)
             print(f"[BC] epoch {epoch+1:3d}  loss={avg:.4f}  "
                   f"time={time.time()-t0:.1f}s")
             self._save()
 
+    def _train_batch(self,
+                     batch: dict[str, torch.Tensor],
+                     hidden: Optional[torch.Tensor],
+                     context: Optional[torch.Tensor],
+                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        flows = batch["flows"].to(self.device, non_blocking=True)
+        movement = batch["movement"].to(self.device, non_blocking=True)
+        buttons = batch["buttons"].to(self.device, non_blocking=True)
+        ego = batch["ego_player"].to(self.device, dtype=torch.float32).unsqueeze(1)
+        audio = None
+        if self.cfg.use_audio:
+            audio = batch["audio"].to(self.device, non_blocking=True)
+
+        if hidden is not None:
+            hidden = hidden.to(self.device, non_blocking=True)
+        if context is not None:
+            context = context.to(self.device, non_blocking=True)
+
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.amp_dtype,
+            enabled=self.use_amp,
+        ):
+            out = self.model(flows, ego, hidden=hidden,
+                             audio=audio, context=context)
+            loss = bc_loss(out, {"movement": movement, "buttons": buttons})
+
+        self.optim.zero_grad(set_to_none=True)
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optim)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.scaler.step(self.optim)
+        self.scaler.update()
+        return loss.detach(), out["hidden"].detach(), out["context"].detach()
+
     # ------------------------------------------------------------------
     def _save(self):
         p = self.cfg.ckpt_dir / f"bc_epoch{self.epoch:03d}.pt"
+        model = self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model
         torch.save({
             "epoch": self.epoch,
-            "model": self.model.state_dict(),
+            "model": model.state_dict(),
             "optim_name": "muon",
             "optim": self.optim.state_dict(),
         }, p)

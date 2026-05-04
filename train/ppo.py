@@ -91,7 +91,6 @@ class PPOTrainer:
             mingru_dropout=cfg.mingru_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
-            use_match_context=cfg.use_match_context,
         ).to(self.device)
 
         if bc_checkpoint is not None:
@@ -114,9 +113,10 @@ class PPOTrainer:
 
     # ------------------------------------------------------------------
     def _forward_chunk(self, batch: dict[str, torch.Tensor], start: int, end: int,
-                       hidden: Optional[torch.Tensor] = None,
-                       ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-                                   torch.Tensor]:
+                        hidden: Optional[torch.Tensor] = None,
+                        context: Optional[torch.Tensor] = None,
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                                    torch.Tensor, torch.Tensor]:
         kw = {}
         if self.cfg.use_audio:
             kw["audio"] = batch["audio"][start:end].unsqueeze(0)
@@ -124,25 +124,30 @@ class PPOTrainer:
             batch["flows"][start:end].unsqueeze(0),
             torch.zeros(1, 1, device=self.device),
             hidden=hidden,
-            context=None,
+            context=context,
             **kw,
         )
         return (out["movement"].squeeze(0),
                 out["buttons"].squeeze(0),
                 out["value"].squeeze(0),
-                out["hidden"])
+                out["hidden"],
+                out["context"])
 
     @torch.no_grad()
-    def _chunk_initial_hiddens(self, batch: dict[str, torch.Tensor],
-                               starts: list[int], seq_len: int,
-                               ) -> dict[int, Optional[torch.Tensor]]:
+    def _chunk_initial_states(self, batch: dict[str, torch.Tensor],
+                              starts: list[int], seq_len: int,
+                              ) -> dict[int, tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
         hiddens: dict[int, Optional[torch.Tensor]] = {}
+        contexts: dict[int, Optional[torch.Tensor]] = {}
         hidden = None
+        context = None
         T = len(batch["rewards"])
         for start in starts:
             hiddens[start] = None if hidden is None else hidden.detach()
-            _, _, _, hidden = self._forward_chunk(batch, start, min(start + seq_len, T), hidden)
-        return hiddens
+            contexts[start] = None if context is None else context.detach()
+            _, _, _, hidden, context = self._forward_chunk(
+                batch, start, min(start + seq_len, T), hidden, context)
+        return {start: (hiddens[start], contexts[start]) for start in starts}
 
     def _sample_starts(self, starts: list[int], advantages: torch.Tensor,
                        seq_len: int, chunks_per_update: int) -> list[int]:
@@ -184,7 +189,7 @@ class PPOTrainer:
         total_entropy = 0.0
 
         for _ in range(cfg.ppo_updates):
-            chunk_hiddens = self._chunk_initial_hiddens(batch, starts, seq_len)
+            chunk_states = self._chunk_initial_states(batch, starts, seq_len)
             selected = self._sample_starts(starts, advantages, seq_len, chunks_per_update)
 
             losses = []
@@ -194,8 +199,9 @@ class PPOTrainer:
 
             for start in selected:
                 end = min(start + seq_len, T)
-                new_mov, new_btn, new_val, _ = self._forward_chunk(
-                    batch, start, end, chunk_hiddens[start])
+                hidden, context = chunk_states[start]
+                new_mov, new_btn, new_val, _, _ = self._forward_chunk(
+                    batch, start, end, hidden, context)
 
                 mov_dist = torch.distributions.Categorical(logits=new_mov)
                 mov_logp = mov_dist.log_prob(batch["movement"][start:end])

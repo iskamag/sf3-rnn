@@ -108,14 +108,12 @@ class SF3RNN(nn.Module):
                  mingru_dropout: float = 0.1,
                  num_directions: int = 9,
                  num_buttons: int = 6,
-                 use_match_context: bool = False,
                  ):
         super().__init__()
         self.mingru_hidden = mingru_hidden
         self.mingru_layers = mingru_layers
         self.use_audio = use_audio
         self.context_dim = context_dim
-        self.use_match_context = use_match_context
 
         self.encoder = _FlowEncoder(feature_dim)
 
@@ -181,28 +179,17 @@ class SF3RNN(nn.Module):
         else:
             ctx = context
 
-        if not self.use_match_context:
-            ego = ego_player.unsqueeze(1).expand(-1, T, -1)
-            ctx_seq = ctx.unsqueeze(1).expand(-1, T, -1)
-            parts = [vis, ctx_seq, ego]
-            if self.use_audio:
-                parts.insert(1, aud)
-            recurrent_in = torch.cat(parts, dim=-1)
-            recurrent_out, hidden = self.recurrent(recurrent_in, hidden)
-        else:
-            # Context profiling is opt-in because it prevents vectorized recurrent execution.
-            recurrent_outs = []
-            for t in range(T):
-                parts = [vis[:, t], ctx, ego_player]
-                if self.use_audio:
-                    parts.insert(1, aud[:, t])
-                step = torch.cat(parts, dim=-1).unsqueeze(1)
+        ego = ego_player.unsqueeze(1).expand(-1, T, -1)
+        ctx_seq = ctx.unsqueeze(1).expand(-1, T, -1)
+        parts = [vis, ctx_seq, ego]
+        if self.use_audio:
+            parts.insert(1, aud)
+        recurrent_in = torch.cat(parts, dim=-1)
+        recurrent_out, hidden = self.recurrent(recurrent_in, hidden)
 
-                out, hidden = self.recurrent(step, hidden)    # (B, 1, H)
-                ctx = self.match_context(out.squeeze(1), ctx) # update profile
-                recurrent_outs.append(out)
-
-            recurrent_out = torch.cat(recurrent_outs, dim=1)   # (B, T, H)
+        # Update once per chunk so training stays sequence-parallel while
+        # preserving a persistent opponent profile across chunks/matches.
+        ctx = self.match_context(recurrent_out[:, -1], ctx)
 
         return {
             "movement": self.movement_head(recurrent_out),
@@ -230,6 +217,6 @@ class SF3RNN(nn.Module):
         ego = torch.tensor([[ego_player]], device=flow.device, dtype=torch.float32)
         out = self.forward(flow, hidden=hidden, audio=audio,
                            context=self._context, ego_player=ego)
-        self._context = out["context"] if self.use_match_context else None
+        self._context = out["context"]
         actions = {k: out[k][:, -1].squeeze(0) for k in ("movement", "buttons", "value")}
         return actions, out["hidden"]

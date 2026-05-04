@@ -55,23 +55,24 @@ class Config:
     num_buttons: int = 6         # LP, MP, HP, LK, MK, HK
 
     # --- Training ---
-    batch_size: int = 4
+    batch_size: int = 16
     seq_len: int = 128           # frames per training segment  (~2 s)
-    segment_stride: int = 4      # reduce highly-overlapping BC windows
+    segment_stride: int = 128    # ordered chunks; context carries across them
     lr: float = 1e-4
     muon_lr: float = 2e-3
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
     weight_decay: float = 1e-5
     bc_epochs: int = 100
-    num_workers: int = 0
+    use_amp: bool = True
+    amp_dtype: str = "float16"
+    compile_model: bool = True
 
     # --- Match-context profiling ---
-    # A 64-d GRU that the minGRU reads & writes every frame.  Persists
-    # across BC segments (detached) and full PPO episodes, accumulating
-    # an opponent profile:  tendencies, habits, adaptation.
+    # A 64-d GRU that the minGRU reads every frame and updates at chunk
+    # boundaries. Persists across ordered BC chunks and full PPO episodes,
+    # accumulating an opponent profile: tendencies, habits, adaptation.
     context_dim: int = 64
-    use_match_context: bool = False
 
     # --- PPO fine-tuning ---
     ppo_clip_eps: float = 0.2
