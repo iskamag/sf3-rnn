@@ -57,6 +57,7 @@ class BCTrainer:
             lstm_dropout=cfg.lstm_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
+            use_match_context=cfg.use_match_context,
         ).to(self.device)
 
         self.optim = torch.optim.AdamW(
@@ -70,7 +71,7 @@ class BCTrainer:
 
         self.dataset = ReplayDataset(
             cfg.processed_dir, cfg.seq_len, cfg.total_delay_frames,
-            use_audio=cfg.use_audio)
+            use_audio=cfg.use_audio, segment_stride=cfg.segment_stride)
         self.loader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=False,
             num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
