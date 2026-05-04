@@ -95,7 +95,7 @@ st-rnn/
 ├── vision/
 │   ├── optical_flow.py        # Farneback flow computation
 │   ├── audio_features.py      # MFCC + RMS + spectral centroid (256-pt FFT)
-│   └── game_state.py          # Match splitting from health signal
+│   └── game_state.py          # Health-bar detection and HUD extraction
 ├── emulator/
 │   ├── input_log.lua          # FBNeo Lua script — logs P1/P2 inputs, health, stun
 │   ├── capture_replay.sh      # Launch + capture video/audio/inputs
@@ -106,7 +106,7 @@ st-rnn/
 │   ├── bc.py                  # Behaviour cloning trainer
 │   ├── ppo.py                 # PPO trainer + rollout buffer
 │   └── reward.py              # Health-delta reward + GAE
-    └── scripts/
+└── scripts/
     ├── train.sh               # Unified CLI wrapper
     ├── collect_data.py        # Capture → shard pipeline
     ├── train_bc.py            # BC training entry point
@@ -158,14 +158,14 @@ The last segment (`1777806845400-9194`) is the challenge ID.
 What happens:
 1. `gamescope` launches the emulator with `input_log.lua`
 2. A screencast dialog appears — **accept it**
-3. GStreamer captures the gamescope window as native-resolution lossless H.264
-   video + 8-bit 16 kHz mono WAV audio
+3. GStreamer captures the gamescope window as 160×120 GRAY8 raw video + 8-bit
+   16 kHz mono WAV audio
 4. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
    timer, and wins to `input_log.txt`
 
 Output in `data/captures/1777806845400-9194/`:
 ```
-video.mkv       — 640×480 lossless H.264, 60 fps
+video.raw       — 160×120 GRAY8 raw frame bytes, 60 fps
 audio.wav       — 8-bit mono 16 kHz PCM
 input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 ```
@@ -334,8 +334,9 @@ when P2's combo counter is non-zero (P2 is hitting P1), and vice versa.
   backbone) — flow fields are 2-channel and cheap to process.
 - BC trains on diverse player data — the model learns general SF3
   competency, not to mimic a single player.
-- PPO reward is fully screen-observable; the Lua script reads health
-  directly from CPS3 memory during capture, so no HUD extraction needed.
+- PPO reward is screen-observable via HUD ROIs on 384×224 frames; during
+  offline capture health/stun is read directly from CPS3 memory by the Lua
+  script, so the training data is ground-truth accurate.
 - The MatchContext GRU gives the minGRU a persistent 64-d opponent profile
   that survives BC segment boundaries and full PPO episodes.
 - Audio features use a manual 256-point DCT (no scipy dependency).
