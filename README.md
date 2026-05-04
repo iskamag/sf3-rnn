@@ -14,26 +14,40 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │      ↓                                       ↓              │
 │  ReactionBuffer — visual lag 8 f       AudioBuffer — 3 f    │
 │      ↓                                       ↓              │
-│  Farneback OF  (2-ch, 160×120)        MFCC+energy  (15-d)  │
+│  Farneback OF  (N×2-ch, 160×120)     MFCC+energy  (N×15-d) │
 │      ↓                                       ↓              │
-│  FlowCNN → 256-d                       AudioMLP → 64-d      │
+│  FlowCNN → N×256-d                     pool → AudioMLP 64-d │
 │      ↓                                       ↓              │
-│      └───── concat ──── 385-d ──────────┘                  │
+│      └─── pool ──── 256-d ────────────────┘                │
 │      └───── + MatchContext (64-d GRU) ───┘                  │
 │      └───── + ego_player (1-d flag)  ───┘                  │
+│      └───── + prev_actions (pooled N) ──┘                  │
 │                        ↓                                    │
-│  2-layer minGRU (hidden=512) ← hidden state persistent      │
+│  2-layer minGRU (hidden=512) ← 1 step per N frames          │
 │                        ↓                                    │
-│  ┌──────────┬──────────┬──────────┐                         │
-│  │ movement │ buttons  │  value   │                         │
-│  │ (9-way)  │ (6-bit)  │  scalar  │                         │
-│  └──────────┴──────────┴──────────┘                         │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  [hidden | flow_feat₀] → movement₀ buttons₀ value₀  │    │
+│  │  [hidden | flow_feat₁] → movement₁ buttons₁ value₁  │    │
+│  │  ...                              ...                │    │
+│  │  [hidden | flow_featₙ] → movementₙ buttonsₙ valueₙ  │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                        ↓                                    │
 │  OutputDelayBuffer — motor lag 4 f                          │
 │                        ↓                                    │
 │  game input                                                 │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Stride-N recurrence**: The minGRU runs once per `temporal_stride` (N) frames
+(default N=4, ~15 Hz) instead of at 60 Hz.  Each step ingests N flow frames
+and produces N consecutive action sets — matching the ~67 ms human decision
+cadence.  Vision still samples at 60 Hz; only the recurrence is coarsened.
+
+**Autoregressive prev-actions**: The model feeds its own previous N actions
+(distribution over movement + buttons) into the next recurrence step via a
+learned embedding, pooled across the N frames.  During BC/PPO training this
+uses teacher-forced ground-truth, shifted by one step; at inference it uses
+the model's own softmax/sigmoid.
 
 **Why optical flow instead of raw pixels?**
 - Invariant to static backgrounds and character costumes
@@ -56,13 +70,15 @@ the full match from optical flow alone.
 ### Model detail
 
 - **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d
-- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → MLP → 64-d
-- **minGRU**: 2 layers, hidden=512, dropout=0.1, input = 256 + 64 + 64 + 1 = 385-d
+- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → pool over N frames → MLP → 64-d
+- **minGRU**: 2 layers, hidden=512, dropout=0.1, runs once per N=4 frames
+- **minGRU input**: 256 (pooled flow) + 64 (audio) + 64 (context) + 1 (ego) + 64 (prev-actions) = 449-d (with audio)
+- **Action decoder**: shared MLP taking `[hidden | flow_featᵢ]` per frame slot → produces N independent (movement, buttons, value) sets
 - **MatchContext**: GRUCell(minGRU_out → 64-d), persisted across BC segments
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
-- **Value head**: scalar, for PPO
-- **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input so the
-  model can play either side; dataset randomly picks a player per sample
+- **Value head**: merged into the per-slot action decoder; scalar per frame
+- **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input
+- **Prev-actions**: N distributions from the previous step pooled into a 64-d embedding
 
 ## Project layout
 
@@ -279,15 +295,17 @@ All tunables in `config.py`:
 | `audio_lag_frames`     | 3       | Audio sensory delay (faster pathway) |
 | `motor_lag_frames`     | 4       | Motor/output delay (frames)          |
 | `total_delay_frames`   | 12      | Visual total ≈ 200 ms @ 60 fps       |
+| `temporal_stride`      | 4       | Frames per recurrence step (N)       |
 | `use_audio`            | True    | Enable audio pipeline                |
 | `frame_width`          | 160     | Model optical-flow input width       |
 | `frame_height`         | 120     | Model optical-flow input height      |
 | `context_dim`          | 64      | MatchContext opponent-profile size   |
+| `action_embed_dim`     | 64      | Prev-action embedding dimension      |
 | `feature_dim`          | 256     | Visual feature dimension             |
 | `audio_dim`            | 64      | Audio embedding dimension            |
 | `mingru_hidden`        | 512     | minGRU hidden size                   |
 | `mingru_layers`        | 2       | minGRU depth                         |
-| `seq_len`              | 128     | BC training segment length           |
+| `seq_len`              | 96      | BC training segment length (frames)  |
 | `lr`                   | 1e-4    | Learning rate                        |
 | `ppo_clip_eps`         | 0.2     | PPO clip epsilon                     |
 | `ppo_seq_len`          | 128     | PPO recurrent update chunk length    |
