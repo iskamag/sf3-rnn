@@ -5,7 +5,7 @@
 #   ./emulator/capture_replay.sh <challenge_id> [game]
 #
 # Output (data/captures/<challenge_id>/):
-#   video.mkv      — 640×480 lossless H.264, 60 fps
+#   video.raw      — 160×120 grayscale raw bytes, 60 fps (19200 B/frame)
 #   audio.wav      — 8-bit mono 16 kHz PCM
 #   input_log.txt  — per-frame inputs + health from Lua
 
@@ -38,7 +38,7 @@ _cleanup() {
     [ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
-    rm -f /tmp/st_rnn_y4m
+    rm -f /tmp/st_rnn_y4m /tmp/st_rnn_gst_err /tmp/st_rnn_audio_err
 }
 trap _cleanup EXIT
 
@@ -108,13 +108,10 @@ gst-launch-1.0 -e \
     ! videorate \
     ! video/x-raw,framerate=60/1 \
     ! videoscale \
-    ! video/x-raw,width=640,height=480 \
+    ! video/x-raw,width=160,height=120 \
     ! videoconvert \
-    ! video/x-raw,format=I420 \
-    ! x264enc speed-preset=ultrafast tune=zerolatency pass=quant quantizer=0 key-int-max=60 \
-    ! h264parse \
-    ! matroskamux \
-    ! filesink location="$OUT_DIR/video.mkv" \
+    ! video/x-raw,format=GRAY8 \
+    ! filesink location="$OUT_DIR/video.raw" \
     2>/tmp/st_rnn_gst_err &
 GST_PID=$!
 sleep 1

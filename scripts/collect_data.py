@@ -2,7 +2,7 @@
 """Convert replay captures into mmap-friendly training shards.
 
 Each capture directory contains:
-  video.mkv      — native-resolution cache video, 60 fps
+  video.raw      — 160×120 grayscale raw bytes, 60 fps
   audio.wav      — 8-bit mono 16 kHz PCM
   input_log.txt  — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 
@@ -17,7 +17,6 @@ import argparse
 import wave
 from pathlib import Path
 
-import cv2
 import numpy as np
 from tqdm import tqdm
 
@@ -74,20 +73,13 @@ def load_audio_features(wav_path: Path, num_frames: int,
 
 # ---------------------------------------------------------------------------
 def load_video_frames(path: Path, frame_width: int, frame_height: int) -> np.ndarray | None:
-    """Read video frames as model-sized uint8 greyscale."""
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
+    """Read raw video frames as uint8 greyscale (already 160×120 GRAY8)."""
+    raw = path.read_bytes()
+    frame_bytes = frame_width * frame_height
+    n_frames = len(raw) // frame_bytes
+    if n_frames == 0:
         return None
-    frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (frame_width, frame_height), interpolation=cv2.INTER_AREA)
-        frames.append(gray)
-    cap.release()
-    return np.stack(frames, axis=0) if frames else None
+    return np.frombuffer(raw, dtype=np.uint8).reshape(n_frames, frame_height, frame_width)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +219,7 @@ def main():
     total_matches = 0
 
     for d in tqdm(dirs, desc="Captures"):
-        video = d / "video.mkv"
+        video = d / "video.raw"
         audio = d / "audio.wav"
         log = d / "input_log.txt"
 
@@ -235,7 +227,7 @@ def main():
             tqdm.write(f"  [skip] {d.name}: no input_log.txt")
             continue
         if not video.exists():
-            tqdm.write(f"  [skip] {d.name}: no video.mkv")
+            tqdm.write(f"  [skip] {d.name}: no video.raw")
             continue
 
         # ---- inputs ----
