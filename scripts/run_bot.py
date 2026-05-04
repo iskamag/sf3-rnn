@@ -3,11 +3,8 @@
 
     python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
 
-Pipeline:  camera -> [sensory lag] -> minGRU -> [motor lag] -> game input
-           ~100 ms              instant        ~100 ms
-
-Between matches the bot detects character-select / menus by watching
-for health-bar absence and navigates via a configurable sequence.
+The model runs once per *temporal_stride* (N) frames and produces N consecutive
+actions in one recurrence step.  Vision still streams at 60 fps.
 """
 
 from __future__ import annotations
@@ -18,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from config import Config
 from model.rnn import SF3RNN
@@ -47,14 +45,10 @@ def navigate_menu(env: MssScreenEnv,
                   cfg: Config,
                   roi: dict,
                   ) -> int:
-    """Run the character-select sequence.  Returns the number of frames
-    spent navigating (for logging)."""
-
     seq = cfg.char_select_seq
     post_stall = cfg.post_match_stall
     menu_detect = cfg.menu_detect_frames
 
-    # Stall briefly after match end
     for _ in range(post_stall):
         env.step(Direction.NEUTRAL, [])
 
@@ -75,7 +69,6 @@ def navigate_menu(env: MssScreenEnv,
             else:
                 health_seen_since = 0
 
-    # If health bars still absent, idle and poll until they return
     safety = menu_detect
     while safety > 0:
         frame, _, _, _ = env.step(Direction.NEUTRAL, [])
@@ -84,15 +77,13 @@ def navigate_menu(env: MssScreenEnv,
 
         if has_health_bar(frame, roi):
             health_seen_since += 1
-            if health_seen_since >= 6:          # stable for 6 consecutive frames
+            if health_seen_since >= 6:
                 break
         else:
             health_seen_since = 0
         safety -= 1
 
-    # Drain the output buffer (actions queued during menus are stale)
     motor_buf._queue.clear()
-
     return frames_spent
 
 
@@ -114,6 +105,7 @@ def main():
     if args.motor_lag is not None:
         cfg.motor_lag_frames = args.motor_lag
 
+    N = cfg.temporal_stride
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     roi = {
@@ -127,6 +119,7 @@ def main():
         audio_dim=cfg.audio_dim,
         context_dim=cfg.context_dim,
         action_embed_dim=cfg.action_embed_dim,
+        temporal_stride=cfg.temporal_stride,
         mingru_hidden=cfg.mingru_hidden,
         mingru_layers=cfg.mingru_layers,
         mingru_dropout=cfg.mingru_dropout,
@@ -141,11 +134,14 @@ def main():
     env = MssScreenEnv(cfg)
     frame = env.reset()
 
+    # Need N extra buffer slots to collect multi-frame flows
     sensory_buf = ReactionBuffer(
         sensory_lag=cfg.sensory_lag_frames,
+        extra=cfg.temporal_stride,
         frame_width=cfg.frame_width, frame_height=cfg.frame_height,
         flow_norm=cfg.flow_norm,
         device=str(device))
+
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
 
     audio_buf: AudioBuffer | None = None
@@ -158,7 +154,7 @@ def main():
             fps=cfg.fps,
             device=str(device))
         audio_cap = AudioCapture(callback=audio_buf.add_samples,
-                                 sample_rate=cfg.audio_sample_rate)
+                                  sample_rate=cfg.audio_sample_rate)
     audio_cap.start()
 
     sensory_buf.add_frame(frame)
@@ -166,13 +162,16 @@ def main():
     step = 0
     actions_sent = 0
 
-    # Menu-detection state
     health_absent = 0
     navigations = 0
 
-    print(f"Running  (sensory={cfg.sensory_lag_frames}f  "
-          f"motor={cfg.motor_lag_frames}f  "
-          f"total={cfg.total_delay_frames}f).  Ctrl+C to stop.")
+    # Stride-N pipeline state
+    pending_flows: list[torch.Tensor] = []
+    pending_audio: list[torch.Tensor] = []
+    pending_actions: list[tuple] = []                # (dir_int, btn_mask, logp, val)
+
+    print(f"Running  (sensory={cfg.sensory_lag_frames}f  motor={cfg.motor_lag_frames}f  "
+          f"stride={N}  total={cfg.total_delay_frames}f).  Ctrl+C to stop.")
     try:
         while True:
             loop_start = time.perf_counter()
@@ -188,6 +187,9 @@ def main():
                 print(f"  [menu] navigating character select …")
                 spent = navigate_menu(env, sensory_buf, audio_buf, motor_buf, cfg, roi)
                 model.reset_hidden()
+                pending_flows.clear()
+                pending_audio.clear()
+                pending_actions.clear()
                 health_absent = 0
                 navigations += 1
                 print(f"  [menu] done — {spent} f spent, resuming")
@@ -195,51 +197,70 @@ def main():
                 sensory_buf.add_frame(frame)
                 continue
 
-            # ---- normal gameplay ----
+            # ---- accumulate sensory data ----
             flow = sensory_buf.get_flow()
             if flow is not None:
-                audio_feats = audio_buf.get_features() if audio_buf is not None else None
+                pending_flows.append(flow.squeeze(0).squeeze(0))              # (2, H, W)
+                if audio_buf is not None:
+                    af = audio_buf.get_features()
+                    pending_audio.append(af.squeeze(0) if af is not None else torch.zeros(cfg.audio_feat_dim))
+
+            # ---- model forward every N frames ----
+            if len(pending_flows) >= N and len(pending_actions) == 0:
+                flows_in = torch.stack(pending_flows[-N:], dim=0).unsqueeze(0)  # (1, N, 2, H, W)
+                audio_in = None
+                if cfg.use_audio and len(pending_audio) >= N:
+                    audio_in = torch.stack(pending_audio[-N:], dim=0).unsqueeze(0)  # (1, N, 15)
+                elif cfg.use_audio:
+                    audio_in = torch.zeros(1, N, cfg.audio_feat_dim, device=device)
+
                 with torch.inference_mode():
-                    actions, hidden = model.step(flow, model.hidden,
-                                                 audio_feats=audio_feats)
+                    actions, hidden = model.step(flows_in.to(device), model.hidden,
+                                                  audio_feats=audio_in.to(device) if audio_in is not None else None)
                     model.hidden = hidden
 
-                if args.deterministic:
-                    direction, buttons = decode_action(
-                        actions["movement"], actions["buttons"], threshold=0.5)
-                    mov_dist = torch.distributions.Categorical(logits=actions["movement"])
-                    direction_int = int(direction)
-                    btn_probs = torch.sigmoid(actions["buttons"])
-                    btn_mask = (btn_probs > 0.5).float()
-                    log_prob = (mov_dist.log_prob(torch.tensor(direction_int, device=device)) +
-                                torch.distributions.Bernoulli(btn_probs).log_prob(btn_mask).sum())
+                # Decode all N actions
+                for i in range(N):
+                    mov_i = actions["movement"][i]                                # (9,)
+                    btn_i = actions["buttons"][i]                                 # (6,)
+                    val_i = actions["value"][i]                                   # scalar
+
+                    if args.deterministic:
+                        direction, buttons = decode_action(mov_i, btn_i, threshold=0.5)
+                        direction_int = int(direction)
+                        btn_probs = torch.sigmoid(btn_i)
+                        btn_mask = (btn_probs > 0.5).float()
+                        mov_dist = torch.distributions.Categorical(logits=mov_i)
+                        log_prob = (mov_dist.log_prob(torch.tensor(direction_int, device=device)) +
+                                    torch.distributions.Bernoulli(btn_probs).log_prob(btn_mask).sum())
+                    else:
+                        mov_dist = torch.distributions.Categorical(logits=mov_i)
+                        direction_int = mov_dist.sample().item()
+                        btn_probs = torch.sigmoid(btn_i)
+                        btn_dist = torch.distributions.Bernoulli(btn_probs)
+                        btn_mask = btn_dist.sample()
+                        log_prob = (mov_dist.log_prob(torch.tensor(direction_int, device=device)) +
+                                    btn_dist.log_prob(btn_mask).sum())
+
+                    pending_actions.append((direction_int, btn_mask, log_prob.detach(), val_i.detach()))
+
+                pending_flows = pending_flows[-1:]                                 # keep last for continuity
+                pending_audio = pending_audio[-1:]
+
+            # ---- consume next action from pending batch ----
+            if pending_actions:
+                dir_int, btn_mask, logp, val = pending_actions.pop(0)
+                delayed = motor_buf.push(dir_int, btn_mask, logp, val)
+                if delayed is not None:
+                    direction = Direction(delayed.movement)
+                    buttons = [Button(i) for i, v in enumerate(delayed.buttons) if v > 0.5]
+                    actions_sent += 1
                 else:
-                    mov_dist = torch.distributions.Categorical(logits=actions["movement"])
-                    direction_int = mov_dist.sample().item()
-                    btn_probs = torch.sigmoid(actions["buttons"])
-                    btn_dist = torch.distributions.Bernoulli(btn_probs)
-                    btn_mask = btn_dist.sample()
-                    log_prob = (mov_dist.log_prob(torch.tensor(direction_int, device=device)) +
-                                btn_dist.log_prob(btn_mask).sum())
-                    direction = Direction(direction_int)
-                    buttons = [Button(i) for i, v in enumerate(btn_mask) if v > 0.5]
-            else:
-                direction_int, btn_mask = Direction.NEUTRAL, torch.zeros(6)
-                log_prob, direction, buttons = torch.tensor(0.0), Direction.NEUTRAL, []
-
-            delayed = motor_buf.push(
-                direction_int, btn_mask,
-                log_prob.detach(),
-                actions["value"].detach() if flow is not None else torch.tensor(0.0),
-            )
-
-            if delayed is not None:
-                direction = Direction(delayed.movement)
-                buttons = [Button(i) for i, v in enumerate(delayed.buttons) if v > 0.5]
-                actions_sent += 1
+                    direction, buttons = Direction.NEUTRAL, []
             else:
                 direction, buttons = Direction.NEUTRAL, []
 
+            # ---- step environment ----
             frame, _, _, _ = env.step(direction, buttons)
             sensory_buf.add_frame(frame)
 

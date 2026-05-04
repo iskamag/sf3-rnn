@@ -1,8 +1,8 @@
 """Behavior-cloning training loop.
 
-Imitation learning from human replays.  The minGRU receives one optical-flow
-frame per timestep; the reaction-time delay is baked into the dataset's
-target offset.  Loss: CE (movement) + BCE (buttons) summed over timesteps.
+The model runs once per *temporal_stride* (N) frames and produces N action
+sets in one recurrence step.  Targets are reshaped accordingly and the loss
+sums over all N outputs per step.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from train.muon import make_muon_optimizer
 # ---------------------------------------------------------------------------
 def bc_loss(outputs: dict[str, torch.Tensor],
             targets: dict[str, torch.Tensor]) -> torch.Tensor:
-    """Categorical CE for movement + binary CE for buttons."""
+    """Categorical CE for movement + binary CE for buttons — over all N slots."""
     movement_loss = nn.CrossEntropyLoss()(
         outputs["movement"].reshape(-1, outputs["movement"].size(-1)),
         targets["movement"].reshape(-1),
@@ -48,6 +48,11 @@ def bc_loss(outputs: dict[str, torch.Tensor],
 class BCTrainer:
     def __init__(self, cfg: Config, resume: Optional[Path] = None):
         self.cfg = cfg
+        self.N = cfg.temporal_stride
+        assert cfg.seq_len % self.N == 0, \
+            f"seq_len ({cfg.seq_len}) must be divisible by temporal_stride ({self.N})"
+        self.recur_steps = cfg.seq_len // self.N
+
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
         if self.device.type == "cuda":
             torch.set_float32_matmul_precision("high")
@@ -58,6 +63,7 @@ class BCTrainer:
             audio_dim=cfg.audio_dim,
             context_dim=cfg.context_dim,
             action_embed_dim=cfg.action_embed_dim,
+            temporal_stride=cfg.temporal_stride,
             mingru_hidden=cfg.mingru_hidden,
             mingru_layers=cfg.mingru_layers,
             mingru_dropout=cfg.mingru_dropout,
@@ -162,30 +168,39 @@ class BCTrainer:
                      hidden: Optional[torch.Tensor],
                      context: Optional[torch.Tensor],
                      ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        flows = batch["flows"].to(self.device, non_blocking=True)
-        movement = batch["movement"].to(self.device, non_blocking=True)
-        buttons = batch["buttons"].to(self.device, non_blocking=True)
+        B, L = batch["movement"].shape                                    # L = seq_len (frames)
+        T, N = self.recur_steps, self.N
+
+        # Reshape flat-frame data → (B, T, N, ...)
+        flows       = batch["flows"].to(self.device, non_blocking=True)    # (B, L, 2, H, W)
+        flows       = flows.reshape(B, T, N, *flows.shape[2:])
+        movement    = batch["movement"].to(self.device, non_blocking=True)  # (B, L)
+        movement    = movement.reshape(B, T, N)
+        buttons     = batch["buttons"].to(self.device, non_blocking=True)  # (B, L, 6)
+        buttons     = buttons.reshape(B, T, N, -1)
         ego = batch["ego_player"].to(self.device, dtype=torch.float32).unsqueeze(1)
+
         audio = None
         if self.cfg.use_audio:
-            audio = batch["audio"].to(self.device, non_blocking=True)
+            audio = batch["audio"].to(self.device, non_blocking=True)       # (B, L, 15)
+            audio = audio.reshape(B, T, N, -1)
 
         if hidden is not None:
             hidden = hidden.to(self.device, non_blocking=True)
         if context is not None:
             context = context.to(self.device, non_blocking=True)
 
-        B, T = movement.shape
-        mov_oh = F.one_hot(movement, num_classes=self.cfg.num_directions).float()
+        # --- previous-action inputs (teacher forcing, shifted by one step) ---
+        mov_oh = F.one_hot(movement, num_classes=self.cfg.num_directions).float()   # (B, T, N, 9)
         shifted_mov = torch.cat([
-            torch.zeros(B, 1, self.cfg.num_directions, device=self.device),
+            torch.zeros(B, 1, N, self.cfg.num_directions, device=self.device),
             mov_oh[:, :-1],
-        ], dim=1)
+        ], dim=1)                                                                    # (B, T, N, 9)
         shifted_btn = torch.cat([
-            torch.zeros(B, 1, self.cfg.num_buttons, device=self.device),
+            torch.zeros(B, 1, N, self.cfg.num_buttons, device=self.device),
             buttons[:, :-1],
-        ], dim=1)
-        prev_actions = torch.cat([shifted_mov, shifted_btn], dim=-1)  # (B, T, D)
+        ], dim=1)                                                                    # (B, T, N, 6)
+        prev_actions = torch.cat([shifted_mov, shifted_btn], dim=-1)                # (B, T, N, 15)
 
         with torch.amp.autocast(
             device_type=self.device.type,
@@ -218,7 +233,7 @@ class BCTrainer:
 
     def _load(self, path: Path):
         ckpt = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model"])
+        self.model.load_state_dict(ckpt["model"], strict=False)
         if ckpt.get("optim_name") == "muon":
             self.optim.load_state_dict(ckpt["optim"])
         else:

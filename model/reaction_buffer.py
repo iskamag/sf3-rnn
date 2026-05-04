@@ -23,10 +23,13 @@ from vision.optical_flow import compute_flow, preprocess_flow
 class ReactionBuffer:
     def __init__(self,
                  sensory_lag: int = 8,       # frames of input latency
-                 frame_width: int = 160,
-                 frame_height: int = 120,
-                 flow_norm: float = 20.0,
-                 device: str = "cuda",
+        # Need sensory_lag + 2 frames for a single flow pair; add extra
+        # headroom for multi-frame stride-N models (default 4 extra slots).
+        extra: int = 4,
+        frame_width: int = 160,
+        frame_height: int = 120,
+        flow_norm: float = 20.0,
+        device: str = "cuda",
                  ):
         self.sensory_lag = sensory_lag
         self.frame_width = frame_width
@@ -34,9 +37,7 @@ class ReactionBuffer:
         self.flow_norm = flow_norm
         self.device = device
 
-        # Need sensory_lag + 1 frames to produce a flow pair centred at
-        # time t − sensory_lag given the current buffer at time t.
-        self._frames: deque[np.ndarray] = deque(maxlen=sensory_lag + 2)
+        self._frames: deque[np.ndarray] = deque(maxlen=sensory_lag + extra + 2)
 
     # ------------------------------------------------------------------
     def add_frame(self, frame_rgb: np.ndarray):                # (H, W, 3) uint8

@@ -49,6 +49,7 @@ class Config:
     # --- Model ---
     feature_dim: int = 256
     action_embed_dim: int = 64     # previous-action embedding fed into minGRU
+    temporal_stride: int = 4       # recurrence step span (frames); produces N actions/step
     mingru_hidden: int = 512
     mingru_layers: int = 2
     mingru_dropout: float = 0.1
@@ -57,7 +58,7 @@ class Config:
 
     # --- Training ---
     batch_size: int = 16
-    seq_len: int = 128           # frames per training segment  (~2 s)
+    seq_len: int = 96            # frames per training segment  (~1.6 s)
     segment_stride: int = 128    # ordered chunks; context carries across them
     lr: float = 1e-4
     muon_lr: float = 2e-3

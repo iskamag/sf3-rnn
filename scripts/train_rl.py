@@ -3,9 +3,8 @@
 
     python scripts/train_rl.py --bc-ckpt checkpoints/bc_epoch099.pt
 
-The dual-buffer design models both sensory and motor latency separately.
-Logged transitions use the *total-delay* flow so that PPO updates see
-correctly aligned (state, action, reward) tuples.
+The model runs once per *temporal_stride* (N) frames and produces N action
+sets per recurrence step.  Vision still streams at 60 fps.
 """
 
 from __future__ import annotations
@@ -48,8 +47,9 @@ def collect_episode(env: SF3Env,
                     cfg: Config,
                     max_steps: int = 3600,
                     ) -> float:
-    """Run one episode through the dual-latency pipeline, fill the PPO buffer."""
+    """Run one episode, filling the PPO buffer with per-frame alignment."""
 
+    N = cfg.temporal_stride
     model.eval()
     model.reset_hidden()
 
@@ -68,52 +68,70 @@ def collect_episode(env: SF3Env,
     device = next(model.parameters()).device
     reward_cfg = _reward_config(cfg)
 
+    # Stride-N accumulation
+    pending_flows: list[torch.Tensor] = []       # each (2, H, W)
+    pending_audio: list[torch.Tensor] = []        # each (15,)
+    pending_actions: list[tuple] = []             # (dir_int, btn_mask, logp, val)
+
     for _ in range(max_steps):
         flow = sensory_buf.get_flow()
-        if flow is None:
-            frame, _, _, _ = env.step(Direction.NEUTRAL, [])
-            sensory_buf.add_frame(frame)
-            continue
+        if flow is not None:
+            pending_flows.append(flow.squeeze(0).squeeze(0))
+            if audio_buf is not None:
+                af = audio_buf.get_features()
+                pending_audio.append(af.squeeze(0) if af is not None else torch.zeros(cfg.audio_feat_dim))
 
-        # ---- minGRU forward ----
-        audio_feats = audio_buf.get_features() if audio_buf is not None else None
-        with torch.no_grad():
-            actions, hidden = model.step(flow, model.hidden,
-                                         audio_feats=audio_feats)
-            model.hidden = hidden
+        # ---- model forward every N frames ----
+        if len(pending_flows) >= N and len(pending_actions) == 0:
+            flows_in = torch.stack(pending_flows[-N:], dim=0).unsqueeze(0).to(device)
+            audio_in = None
+            if cfg.use_audio and len(pending_audio) >= N:
+                audio_in = torch.stack(pending_audio[-N:], dim=0).unsqueeze(0).to(device)
+            elif cfg.use_audio:
+                audio_in = torch.zeros(1, N, cfg.audio_feat_dim, device=device)
 
-        mov_dist = torch.distributions.Categorical(logits=actions["movement"])
-        movement = mov_dist.sample().item()
+            with torch.no_grad():
+                actions, hidden = model.step(flows_in, model.hidden,
+                                              audio_feats=audio_in)
+                model.hidden = hidden
 
-        btn_probs = torch.sigmoid(actions["buttons"])
-        btn_dist = torch.distributions.Bernoulli(btn_probs)
-        button_mask = btn_dist.sample()
+            for i in range(N):
+                mov_i = actions["movement"][i]
+                btn_i = actions["buttons"][i]
+                val_i = actions["value"][i]
 
-        log_prob = (mov_dist.log_prob(torch.tensor(movement, device=device)) +
-                    btn_dist.log_prob(button_mask).sum())
+                mov_dist = torch.distributions.Categorical(logits=mov_i)
+                movement = mov_dist.sample().item()
+                btn_probs = torch.sigmoid(btn_i)
+                btn_dist = torch.distributions.Bernoulli(btn_probs)
+                button_mask = btn_dist.sample()
+                log_prob = (mov_dist.log_prob(torch.tensor(movement, device=device)) +
+                            btn_dist.log_prob(button_mask).sum())
 
-        # ---- Push into motor-lag pipeline ----
-        delayed = motor_buf.push(
-            movement, button_mask,
-            log_prob.detach(),
-            actions["value"].detach(),
-        )
+                pending_actions.append((movement, button_mask, log_prob.detach(), val_i.detach()))
 
-        if delayed is None:
-            # Pipeline still priming — idle
-            frame, _, _, _ = env.step(Direction.NEUTRAL, [])
-            sensory_buf.add_frame(frame)
-            continue
+            pending_flows = pending_flows[-1:]
+            pending_audio = pending_audio[-1:]
 
-        # ---- Execute the motor-delayed action ----
-        direction = Direction(delayed.movement)
-        buttons = [Button(i) for i, v in enumerate(delayed.buttons) if v > 0.5]
+        # ---- consume next action ----
+        if pending_actions:
+            move, btn_mask, logp, val = pending_actions.pop(0)
+            delayed = motor_buf.push(move, btn_mask, logp, val)
+        else:
+            delayed = None
+
+        if delayed is not None:
+            direction = Direction(delayed.movement)
+            buttons = [Button(i) for i, v in enumerate(delayed.buttons) if v > 0.5]
+        else:
+            direction, buttons = Direction.NEUTRAL, []
+
         frame, _, done, info = env.step(direction, buttons)
 
         # ---- Reward from health delta ----
         curr_state = extract_game_state(frame, roi)
         reward = 0.0
-        if prev_state is not None:
+        if prev_state is not None and delayed is not None:
             reward = compute_step_reward(
                 prev_state, curr_state, env.is_p1(),
                 reward_cfg, len(buttons) > 0,
@@ -122,19 +140,26 @@ def collect_episode(env: SF3Env,
 
         sensory_buf.add_frame(frame)
 
-        # ---- Log transition ----
+        # ---- Log transition (per frame) ----
         decision_flow = sensory_buf.get_flow_at(cfg.total_delay_frames)
         if decision_flow is None:
-            decision_flow = flow
+            decision_flow = flow if flow is not None else torch.zeros(1, 2, cfg.frame_height, cfg.frame_width)
+        if delayed is not None:
+            commit_flow = decision_flow
+        else:
+            commit_flow = torch.zeros(2, cfg.frame_height, cfg.frame_width, device=device)
 
         kwargs = {}
         if cfg.use_audio:
-            kwargs["audio_feats"] = audio_feats.squeeze(0) if audio_feats is not None \
-                else torch.zeros(cfg.audio_feat_dim)
+            kwargs["audio_feats"] = (pending_audio[-1] if pending_audio
+                                     else torch.zeros(cfg.audio_feat_dim)).to(device)
 
         trainer.buffer.add(
-            decision_flow, delayed.movement, delayed.buttons,
-            delayed.log_prob.to(device), delayed.value.to(device),
+            commit_flow,
+            delayed.movement if delayed else Direction.NEUTRAL,
+            delayed.buttons if delayed else torch.zeros(6),
+            delayed.log_prob.to(device) if delayed else torch.tensor(0.0, device=device),
+            delayed.value.to(device) if delayed else torch.tensor(0.0, device=device),
             reward, done, **kwargs,
         )
 
@@ -155,6 +180,7 @@ def main():
     args = p.parse_args()
 
     cfg = Config()
+    N = cfg.temporal_stride
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     trainer = PPOTrainer(cfg, bc_checkpoint=args.bc_ckpt)
@@ -163,9 +189,11 @@ def main():
 
     sensory_buf = ReactionBuffer(
         sensory_lag=cfg.sensory_lag_frames,
+        extra=cfg.temporal_stride,
         frame_width=cfg.frame_width, frame_height=cfg.frame_height,
         flow_norm=cfg.flow_norm,
         device=str(device))
+
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
 
     audio_buf: AudioBuffer | None = None
@@ -178,7 +206,7 @@ def main():
             fps=cfg.fps,
             device=str(device))
         audio_cap = AudioCapture(callback=audio_buf.add_samples,
-                                 sample_rate=cfg.audio_sample_rate)
+                                  sample_rate=cfg.audio_sample_rate)
     audio_cap.start()
 
     total_steps = 0
