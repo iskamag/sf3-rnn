@@ -24,7 +24,6 @@ This tracks the current state of the active `st-rnn` code after the cleanup pass
 - `requirements.txt` covers Python packages, but the real stack also depends on system packages: PipeWire, GStreamer, Wine, gamescope, Fightcade/FBNeo, and portal/DBus components.
 - PPO chunking is better than full-episode backprop, but it is still a Python/PyTorch implementation. It does not get PufferLib-style CUDA graph/static allocator/kernel benefits.
 - PufferLib's MinGRU is worth benchmarking, but a naive PyTorch MinGRU swap should not be assumed faster or better than the current LSTM without measurement.
-- Existing checkpoints may depend on old input dimensions or context behavior. New training runs should start from data generated with the current shard format and `160x120` flow shape.
 - Capture manifests are not implemented. Reproducibility currently depends on keeping local raw capture caches or manually tracking Fightcade challenge IDs.
 
 ## Next Work
