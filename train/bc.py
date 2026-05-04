@@ -1,6 +1,6 @@
 """Behavior-cloning training loop.
 
-Imitation learning from human replays.  The LSTM receives one optical-flow
+Imitation learning from human replays.  The minGRU receives one optical-flow
 frame per timestep; the reaction-time delay is baked into the dataset's
 target offset.  Loss: CE (movement) + BCE (buttons) summed over timesteps.
 """
@@ -52,9 +52,9 @@ class BCTrainer:
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             context_dim=cfg.context_dim,
-            lstm_hidden=cfg.lstm_hidden,
-            lstm_layers=cfg.lstm_layers,
-            lstm_dropout=cfg.lstm_dropout,
+            mingru_hidden=cfg.mingru_hidden,
+            mingru_layers=cfg.mingru_layers,
+            mingru_dropout=cfg.mingru_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
             use_match_context=cfg.use_match_context,

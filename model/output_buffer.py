@@ -1,6 +1,6 @@
 """Output-delay buffer — models the motor side of human reaction time.
 
-After the LSTM produces a prediction, the action must wait *motor_lag*
+After the policy produces a prediction, the action must wait *motor_lag*
 frames before it is physically executed (neural transmission + muscle
 contraction + USB polling + game-engine input sampling).
 """

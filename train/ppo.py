@@ -1,8 +1,8 @@
 """PPO fine-tuning on top of behaviour-cloned policy.
 
 Self-play or environment returns frames.  The agent processes one delayed
-optical-flow frame per LSTM step.  PPO updates run over the full episode
-sequence so the LSTM's hidden state is respected during the backward pass.
+optical-flow frame per minGRU step.  PPO updates run over the full episode
+sequence so the minGRU hidden state is respected during the backward pass.
 """
 
 from __future__ import annotations
@@ -85,9 +85,9 @@ class PPOTrainer:
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             context_dim=cfg.context_dim,
-            lstm_hidden=cfg.lstm_hidden,
-            lstm_layers=cfg.lstm_layers,
-            lstm_dropout=cfg.lstm_dropout,
+            mingru_hidden=cfg.mingru_hidden,
+            mingru_layers=cfg.mingru_layers,
+            mingru_dropout=cfg.mingru_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
             use_match_context=cfg.use_match_context,
@@ -107,9 +107,9 @@ class PPOTrainer:
 
     # ------------------------------------------------------------------
     def _forward_chunk(self, batch: dict[str, torch.Tensor], start: int, end: int,
-                       hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+                       hidden: Optional[torch.Tensor] = None,
                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-                                  tuple[torch.Tensor, torch.Tensor]]:
+                                   torch.Tensor]:
         kw = {}
         if self.cfg.use_audio:
             kw["audio"] = batch["audio"][start:end].unsqueeze(0)
@@ -128,12 +128,12 @@ class PPOTrainer:
     @torch.no_grad()
     def _chunk_initial_hiddens(self, batch: dict[str, torch.Tensor],
                                starts: list[int], seq_len: int,
-                               ) -> dict[int, Optional[tuple[torch.Tensor, torch.Tensor]]]:
-        hiddens: dict[int, Optional[tuple[torch.Tensor, torch.Tensor]]] = {}
+                               ) -> dict[int, Optional[torch.Tensor]]:
+        hiddens: dict[int, Optional[torch.Tensor]] = {}
         hidden = None
         T = len(batch["rewards"])
         for start in starts:
-            hiddens[start] = None if hidden is None else tuple(h.detach() for h in hidden)
+            hiddens[start] = None if hidden is None else hidden.detach()
             _, _, _, hidden = self._forward_chunk(batch, start, min(start + seq_len, T), hidden)
         return hiddens
 

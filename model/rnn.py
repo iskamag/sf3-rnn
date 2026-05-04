@@ -1,9 +1,9 @@
-"""CNN + (optional) Audio + MatchContext → LSTM policy model for SF3.
+"""CNN + (optional) Audio + MatchContext -> minGRU policy model for SF3.
 
 Visual:    optical flow (2-ch)  → FlowCNN      → feature_dim
 Audio:     MFCC + energy        → AudioMLP      → audio_dim    (if use_audio)
-Context:   LSTM output          → MatchContext  → context_dim  (persistent opponent profile)
-Fused:     concat(vis, aud, ctx)→ LSTM           → movement / buttons / value
+Context:   minGRU output        → MatchContext  → context_dim  (persistent opponent profile)
+Fused:     concat(vis, aud, ctx)→ minGRU         → movement / buttons / value
 
 The match-context vector is a learned opponent profile that persists
 across BC training segments (detached at boundaries) and across the
@@ -12,13 +12,16 @@ full episode during PPO.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from minGRU_pytorch import minGRU
 
 from model.context import MatchContext
+
+
+HiddenState = Optional[torch.Tensor]
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +72,27 @@ class _AudioEncoder(nn.Module):
         return feats.reshape(*lead, -1)
 
 
+class _MinGRUStack(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float):
+        super().__init__()
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.input_proj = nn.Linear(input_dim, hidden_dim) if input_dim != hidden_dim else nn.Identity()
+        self.layers = nn.ModuleList([minGRU(hidden_dim) for _ in range(num_layers)])
+        self.dropout = nn.Dropout(dropout) if num_layers > 1 and dropout > 0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor, hidden: HiddenState = None) -> tuple[torch.Tensor, torch.Tensor]:
+        x = self.input_proj(x)
+        next_hidden = []
+        for layer_idx, layer in enumerate(self.layers):
+            prev = None if hidden is None else hidden[layer_idx]
+            x, prev = layer(x, prev, return_next_prev_hidden=True)
+            next_hidden.append(prev)
+            if layer_idx < self.num_layers - 1:
+                x = self.dropout(x)
+        return x, torch.stack(next_hidden, dim=0)
+
+
 # ---------------------------------------------------------------------------
 # Full model
 # ---------------------------------------------------------------------------
@@ -79,16 +103,16 @@ class SF3RNN(nn.Module):
                  audio_dim: int = 64,
                  audio_feat_dim: int = 15,
                  context_dim: int = 64,
-                 lstm_hidden: int = 512,
-                 lstm_layers: int = 2,
-                 lstm_dropout: float = 0.1,
+                 mingru_hidden: int = 512,
+                 mingru_layers: int = 2,
+                 mingru_dropout: float = 0.1,
                  num_directions: int = 9,
                  num_buttons: int = 6,
                  use_match_context: bool = False,
                  ):
         super().__init__()
-        self.lstm_hidden = lstm_hidden
-        self.lstm_layers = lstm_layers
+        self.mingru_hidden = mingru_hidden
+        self.mingru_layers = mingru_layers
         self.use_audio = use_audio
         self.context_dim = context_dim
         self.use_match_context = use_match_context
@@ -96,21 +120,19 @@ class SF3RNN(nn.Module):
         self.encoder = _FlowEncoder(feature_dim)
 
         # +1 for the ego_player indicator bit (0=P1, 1=P2)
-        lstm_input = feature_dim + context_dim + 1
+        recurrent_input = feature_dim + context_dim + 1
         if use_audio:
             self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
-            lstm_input += audio_dim
+            recurrent_input += audio_dim
         else:
             self.audio_encoder = None
 
-        self.match_context = MatchContext(lstm_hidden, context_dim)
+        self.match_context = MatchContext(mingru_hidden, context_dim)
 
-        self.lstm = nn.LSTM(lstm_input, lstm_hidden,
-                            num_layers=lstm_layers,
-                            dropout=lstm_dropout,
-                            batch_first=True)
+        self.recurrent = _MinGRUStack(recurrent_input, mingru_hidden,
+                                      mingru_layers, mingru_dropout)
 
-        head = [lstm_hidden, lstm_hidden // 2]
+        head = [mingru_hidden, mingru_hidden // 2]
         self.movement_head = nn.Sequential(
             nn.Linear(*head), nn.ReLU(), nn.Linear(head[1], num_directions),
         )
@@ -121,7 +143,7 @@ class SF3RNN(nn.Module):
             nn.Linear(*head), nn.ReLU(), nn.Linear(head[1], 1),
         )
 
-        self.hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        self.hidden: HiddenState = None
         self._context: Optional[torch.Tensor] = None          # (B, context_dim)
 
     # ------------------------------------------------------------------
@@ -139,7 +161,7 @@ class SF3RNN(nn.Module):
     def forward(self,
                 flows: torch.Tensor,                          # (B, T, 2, H, W)
                 ego_player: torch.Tensor,                      # (B, 1) float 0=P1, 1=P2
-                hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                hidden: HiddenState = None,
                 audio: Optional[torch.Tensor] = None,          # (B, T, 15) or None
                 context: Optional[torch.Tensor] = None,         # (B, C) initial context
                 ) -> Dict[str, torch.Tensor]:
@@ -165,27 +187,27 @@ class SF3RNN(nn.Module):
             parts = [vis, ctx_seq, ego]
             if self.use_audio:
                 parts.insert(1, aud)
-            lstm_in = torch.cat(parts, dim=-1)
-            lstm_out, hidden = self.lstm(lstm_in, hidden)
+            recurrent_in = torch.cat(parts, dim=-1)
+            recurrent_out, hidden = self.recurrent(recurrent_in, hidden)
         else:
-            # Context profiling is opt-in because it prevents vectorized LSTM execution.
-            lstm_outs = []
+            # Context profiling is opt-in because it prevents vectorized recurrent execution.
+            recurrent_outs = []
             for t in range(T):
                 parts = [vis[:, t], ctx, ego_player]
                 if self.use_audio:
                     parts.insert(1, aud[:, t])
                 step = torch.cat(parts, dim=-1).unsqueeze(1)
 
-                out, hidden = self.lstm(step, hidden)         # (B, 1, H)
+                out, hidden = self.recurrent(step, hidden)    # (B, 1, H)
                 ctx = self.match_context(out.squeeze(1), ctx) # update profile
-                lstm_outs.append(out)
+                recurrent_outs.append(out)
 
-            lstm_out = torch.cat(lstm_outs, dim=1)             # (B, T, H)
+            recurrent_out = torch.cat(recurrent_outs, dim=1)   # (B, T, H)
 
         return {
-            "movement": self.movement_head(lstm_out),
-            "buttons":  self.button_head(lstm_out),
-            "value":    self.value_head(lstm_out).squeeze(-1),
+            "movement": self.movement_head(recurrent_out),
+            "buttons":  self.button_head(recurrent_out),
+            "value":    self.value_head(recurrent_out).squeeze(-1),
             "hidden":   hidden,
             "context":  ctx,
         }
@@ -194,11 +216,10 @@ class SF3RNN(nn.Module):
     @torch.no_grad()
     def step(self,
              flow: torch.Tensor,                              # (1, 1, 2, H, W)
-             hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+             hidden: HiddenState = None,
              audio_feats: Optional[torch.Tensor] = None,       # (1, 15)
              ego_player: float = 0.0,                           # 0=P1, 1=P2
-             ) -> Tuple[Dict[str, torch.Tensor],
-                        Tuple[torch.Tensor, torch.Tensor]]:
+             ) -> tuple[Dict[str, torch.Tensor], torch.Tensor]:
         """Single-timestep inference.  *flow* and *audio_feats* are the
         (separately delayed) sensory inputs.  The match context persists
         across calls via self._context."""
@@ -211,4 +232,4 @@ class SF3RNN(nn.Module):
                            context=self._context, ego_player=ego)
         self._context = out["context"] if self.use_match_context else None
         actions = {k: out[k][:, -1].squeeze(0) for k in ("movement", "buttons", "value")}
-        return actions, (out["hidden"][0], out["hidden"][1])
+        return actions, out["hidden"]

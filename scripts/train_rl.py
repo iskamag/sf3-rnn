@@ -75,7 +75,7 @@ def collect_episode(env: SF3Env,
             sensory_buf.add_frame(frame)
             continue
 
-        # ---- LSTM forward ----
+        # ---- minGRU forward ----
         audio_feats = audio_buf.get_features() if audio_buf is not None else None
         with torch.no_grad():
             actions, hidden = model.step(flow, model.hidden,

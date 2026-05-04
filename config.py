@@ -48,9 +48,9 @@ class Config:
 
     # --- Model ---
     feature_dim: int = 256
-    lstm_hidden: int = 512
-    lstm_layers: int = 2
-    lstm_dropout: float = 0.1
+    mingru_hidden: int = 512
+    mingru_layers: int = 2
+    mingru_dropout: float = 0.1
     num_directions: int = 9      # neutral + 8-way
     num_buttons: int = 6         # LP, MP, HP, LK, MK, HK
 
@@ -64,7 +64,7 @@ class Config:
     num_workers: int = 4
 
     # --- Match-context profiling ---
-    # A 64-d GRU that the LSTM reads & writes every frame.  Persists
+    # A 64-d GRU that the minGRU reads & writes every frame.  Persists
     # across BC segments (detached) and full PPO episodes, accumulating
     # an opponent profile:  tendencies, habits, adaptation.
     context_dim: int = 64

@@ -1,6 +1,6 @@
-# st-rnn — LSTM for Street Fighter III: 3rd Strike
+# st-rnn — minGRU for Street Fighter III: 3rd Strike
 
-CNN + LSTM policy that plays SF3 through computer vision (optical flow),
+CNN + minGRU policy that plays SF3 through computer vision (optical flow),
 constrained to human reaction time (~200 ms).  Trained via behaviour
 cloning on Fightcade replays, then fine-tuned with PPO.
 
@@ -22,7 +22,7 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │      └───── + MatchContext (64-d GRU) ───┘                  │
 │      └───── + ego_player (1-d flag)  ───┘                  │
 │                        ↓                                    │
-│  2-layer LSTM (hidden=512)  ←  hidden state persistent      │
+│  2-layer minGRU (hidden=512) ← hidden state persistent      │
 │                        ↓                                    │
 │  ┌──────────┬──────────┬──────────┐                         │
 │  │ movement │ buttons  │  value   │                         │
@@ -57,11 +57,11 @@ the full match from optical flow alone.
 
 - **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d
 - **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → MLP → 64-d
-- **LSTM**: 2 layers, hidden=512, dropout=0.1, input = 256 + 64 + 64 + 1 = 385-d
-- **MatchContext**: GRUCell(LSTM_out → 64-d), persisted across BC segments
+- **minGRU**: 2 layers, hidden=512, dropout=0.1, input = 256 + 64 + 64 + 1 = 385-d
+- **MatchContext**: GRUCell(minGRU_out → 64-d), persisted across BC segments
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 - **Value head**: scalar, for PPO
-- **ego_player**: single scalar (0=P1, 1=P2) concatenated into LSTM input so the
+- **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input so the
   model can play either side; dataset randomly picks a player per sample
 
 ## Project layout
@@ -71,7 +71,7 @@ st-rnn/
 ├── config.py                  # All hyperparameters
 ├── model/
 │   ├── action_space.py        # Direction / Button enums, CPS3 bitfield codec
-│   ├── rnn.py                 # FlowCNN + AudioMLP + MatchContext → LSTM
+│   ├── rnn.py                 # FlowCNN + AudioMLP + MatchContext → minGRU
 │   ├── context.py             # MatchContext GRU (opponent profiling)
 │   ├── reaction_buffer.py     # Visual sensory-lag frame buffer
 │   ├── audio_buffer.py        # Audio sensory-lag buffer
@@ -103,8 +103,12 @@ st-rnn/
 pip install -r requirements.txt
 ```
 
-GPU recommended.  Optical flow runs on CPU via OpenCV (Farneback); model
-runs on CUDA.
+For CPU-only systems, install CPU PyTorch/torchvision first from the PyTorch CPU
+index, or use `pip install -r requirements-cpu.txt`, so latest
+`minGRU-pytorch` reuses CPU PyTorch instead of pulling CUDA wheels.
+
+CPU works; CUDA is optional but recommended for training. Optical flow runs on
+CPU via OpenCV (Farneback).
 
 ## Guide: from replay to trained model
 
@@ -198,7 +202,7 @@ python scripts/train_bc.py --resume checkpoints/bc_epoch042.pt
 ```
 
 Loss: `CrossEntropy(movement) + BCEWithLogits(buttons)` summed over the
-full LSTM sequence.  The MatchContext vector persists across segments
+full minGRU sequence.  The MatchContext vector persists across segments
 from the same match (detached at boundaries) so the model learns to
 accumulate an opponent profile.
 
@@ -238,7 +242,7 @@ python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
 ```
 
 Requires a running SF3 instance.  The bot captures frames and audio,
-delays them through the reaction buffers, runs the LSTM, delays the
+delays them through the reaction buffers, runs the minGRU, delays the
 output through the motor buffer, and injects inputs.
 
 Override latency:
@@ -249,7 +253,7 @@ python scripts/run_bot.py --ckpt ... --sensory-lag 8 --motor-lag 4
 
 Between matches the bot detects character-select by watching for
 health-bar absence and navigates via `char_select_seq` in `config.py`.
-The LSTM hidden state and match context are reset at each new match.
+The minGRU hidden state and match context are reset at each new match.
 
 ## Configuration
 
@@ -267,8 +271,8 @@ All tunables in `config.py`:
 | `context_dim`          | 64      | MatchContext opponent-profile size   |
 | `feature_dim`          | 256     | Visual feature dimension             |
 | `audio_dim`            | 64      | Audio embedding dimension            |
-| `lstm_hidden`          | 512     | LSTM hidden size                     |
-| `lstm_layers`          | 2       | LSTM depth                           |
+| `mingru_hidden`        | 512     | minGRU hidden size                   |
+| `mingru_layers`        | 2       | minGRU depth                         |
 | `seq_len`              | 128     | BC training segment length           |
 | `lr`                   | 1e-4    | Learning rate                        |
 | `ppo_clip_eps`         | 0.2     | PPO clip epsilon                     |
@@ -300,6 +304,6 @@ when P2's combo counter is non-zero (P2 is hitting P1), and vice versa.
   competency, not to mimic a single player.
 - PPO reward is fully screen-observable; the Lua script reads health
   directly from CPS3 memory during capture, so no HUD extraction needed.
-- The MatchContext GRU gives the LSTM a persistent 64-d opponent profile
+- The MatchContext GRU gives the minGRU a persistent 64-d opponent profile
   that survives BC segment boundaries and full PPO episodes.
 - Audio features use a manual 256-point DCT (no scipy dependency).

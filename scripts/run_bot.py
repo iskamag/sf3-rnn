@@ -3,7 +3,7 @@
 
     python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
 
-Pipeline:  camera → [sensory lag] → LSTM → [motor lag] → game input
+Pipeline:  camera -> [sensory lag] -> minGRU -> [motor lag] -> game input
            ~100 ms              instant        ~100 ms
 
 Between matches the bot detects character-select / menus by watching
@@ -126,9 +126,9 @@ def main():
         use_audio=cfg.use_audio,
         audio_dim=cfg.audio_dim,
         context_dim=cfg.context_dim,
-        lstm_hidden=cfg.lstm_hidden,
-        lstm_layers=cfg.lstm_layers,
-        lstm_dropout=cfg.lstm_dropout,
+        mingru_hidden=cfg.mingru_hidden,
+        mingru_layers=cfg.mingru_layers,
+        mingru_dropout=cfg.mingru_dropout,
         num_directions=cfg.num_directions,
         num_buttons=cfg.num_buttons,
         use_match_context=cfg.use_match_context,

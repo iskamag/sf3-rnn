@@ -1,6 +1,6 @@
 """Persistent match-context vector — accumulates opponent profile.
 
-A small GRU that the main LSTM reads and writes at every timestep.
+A small GRU that the main minGRU reads and writes at every timestep.
 The context survives across BC training segments (detached at boundaries)
 so the model can learn to profile an opponent over a full match.
 
@@ -21,11 +21,11 @@ class MatchContext(nn.Module):
         self.gru = nn.GRUCell(input_dim, context_dim)
 
     def forward(self,
-                lstm_out: torch.Tensor,                        # (B, H)
+                recurrent_out: torch.Tensor,                   # (B, H)
                 prev_context: torch.Tensor,                    # (B, C)
                 ) -> torch.Tensor:                             # (B, C)
-        """Update the match profile with one timestep of LSTM output."""
-        return self.gru(lstm_out, prev_context)
+        """Update the match profile with one timestep of recurrent output."""
+        return self.gru(recurrent_out, prev_context)
 
     def initial_context(self, batch_size: int,
                         device: torch.device) -> torch.Tensor:
