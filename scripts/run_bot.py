@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 
 from config import Config
@@ -132,6 +131,7 @@ def main():
         lstm_dropout=cfg.lstm_dropout,
         num_directions=cfg.num_directions,
         num_buttons=cfg.num_buttons,
+        use_match_context=cfg.use_match_context,
     ).to(device).eval()
 
     ckpt = torch.load(args.ckpt, map_location=device)
@@ -154,6 +154,7 @@ def main():
             audio_lag=cfg.audio_lag_frames,
             sample_rate=cfg.audio_sample_rate,
             feat_dim=cfg.audio_feat_dim,
+            fps=cfg.fps,
             device=str(device))
         audio_cap = AudioCapture(callback=audio_buf.add_samples,
                                  sample_rate=cfg.audio_sample_rate)

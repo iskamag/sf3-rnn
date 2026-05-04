@@ -31,7 +31,8 @@ from vision.game_state import find_match_boundaries
 
 # ---------------------------------------------------------------------------
 def load_audio_features(wav_path: Path, num_frames: int,
-                        sample_rate: int = 16000) -> np.ndarray:
+                        sample_rate: int = 16000,
+                        fps: int = 60) -> np.ndarray:
     with wave.open(str(wav_path), "rb") as wf:
         sr = wf.getframerate()
         raw = wf.readframes(wf.getnframes())
@@ -53,11 +54,20 @@ def load_audio_features(wav_path: Path, num_frames: int,
             np.linspace(0, len(samples) - 1, n_out),
             np.arange(len(samples)), samples).astype(np.float32)
 
-    spf = 256
+    fft_window = 256
+    half_window = fft_window // 2
+    samples_per_frame = sample_rate / fps
     feats = np.zeros((num_frames, 15), dtype=np.float32)
     for i in range(num_frames):
-        chunk = samples[i * spf : i * spf + spf]
-        if len(chunk) >= 16:
+        center = int(round((i + 0.5) * samples_per_frame))
+        start = center - half_window
+        end = start + fft_window
+        chunk = np.zeros(fft_window, dtype=np.float32)
+        src_start = max(start, 0)
+        src_end = min(end, len(samples))
+        if src_end > src_start:
+            dst_start = src_start - start
+            chunk[dst_start:dst_start + (src_end - src_start)] = samples[src_start:src_end]
             feats[i] = extract_features(chunk, sample_rate)
     return feats
 
@@ -206,7 +216,8 @@ def main():
 
         # ---- audio ----
         if audio.exists() and cfg.use_audio:
-            audio_feats = load_audio_features(audio, n_frames, cfg.audio_sample_rate)
+            audio_feats = load_audio_features(audio, n_frames,
+                                              cfg.audio_sample_rate, cfg.fps)
         else:
             audio_feats = np.zeros((n_frames, cfg.audio_feat_dim), dtype=np.float32)
 

@@ -62,7 +62,7 @@ def decode_action(movement_logits: torch.Tensor,
                   threshold: float = 0.5) -> Tuple[Direction, List[Button]]:
     d = Direction(movement_logits.argmax(dim=-1).item())
     b = [Button(i) for i, logit in enumerate(button_logits)
-         if torch.sigmoid(logit) > threshold]
+         if torch.sigmoid(logit).item() > threshold]
     return d, b
 
 

@@ -84,12 +84,14 @@ class SF3RNN(nn.Module):
                  lstm_dropout: float = 0.1,
                  num_directions: int = 9,
                  num_buttons: int = 6,
+                 use_match_context: bool = False,
                  ):
         super().__init__()
         self.lstm_hidden = lstm_hidden
         self.lstm_layers = lstm_layers
         self.use_audio = use_audio
         self.context_dim = context_dim
+        self.use_match_context = use_match_context
 
         self.encoder = _FlowEncoder(feature_dim)
 
@@ -157,20 +159,28 @@ class SF3RNN(nn.Module):
         else:
             ctx = context
 
-        # Iterate over timesteps so the match context can be injected
-        lstm_outs = []
-        for t in range(T):
-            parts = [vis[:, t], ctx, ego_player]
+        if not self.use_match_context:
+            ego = ego_player.unsqueeze(1).expand(-1, T, -1)
+            ctx_seq = ctx.unsqueeze(1).expand(-1, T, -1)
+            parts = [vis, ctx_seq, ego]
             if self.use_audio:
-                parts.insert(1, aud[:, t])
-            step = torch.cat(parts, dim=-1)
-            step = step.unsqueeze(1)                          # (B, 1, F+A+C+1)
+                parts.insert(1, aud)
+            lstm_in = torch.cat(parts, dim=-1)
+            lstm_out, hidden = self.lstm(lstm_in, hidden)
+        else:
+            # Context profiling is opt-in because it prevents vectorized LSTM execution.
+            lstm_outs = []
+            for t in range(T):
+                parts = [vis[:, t], ctx, ego_player]
+                if self.use_audio:
+                    parts.insert(1, aud[:, t])
+                step = torch.cat(parts, dim=-1).unsqueeze(1)
 
-            out, hidden = self.lstm(step, hidden)             # (B, 1, H)
-            ctx = self.match_context(out.squeeze(1), ctx)     # update profile
-            lstm_outs.append(out)
+                out, hidden = self.lstm(step, hidden)         # (B, 1, H)
+                ctx = self.match_context(out.squeeze(1), ctx) # update profile
+                lstm_outs.append(out)
 
-        lstm_out = torch.cat(lstm_outs, dim=1)                 # (B, T, H)
+            lstm_out = torch.cat(lstm_outs, dim=1)             # (B, T, H)
 
         return {
             "movement": self.movement_head(lstm_out),
@@ -192,10 +202,13 @@ class SF3RNN(nn.Module):
         """Single-timestep inference.  *flow* and *audio_feats* are the
         (separately delayed) sensory inputs.  The match context persists
         across calls via self._context."""
+        if self.use_audio and audio_feats is None:
+            audio_dim = self.audio_encoder.net[0].in_features
+            audio_feats = torch.zeros((1, audio_dim), device=flow.device)
         audio = audio_feats.unsqueeze(1) if audio_feats is not None else None
         ego = torch.tensor([[ego_player]], device=flow.device, dtype=torch.float32)
         out = self.forward(flow, hidden=hidden, audio=audio,
                            context=self._context, ego_player=ego)
-        self._context = out["context"]
-        actions = {k: out[k][:, -1] for k in ("movement", "buttons", "value")}
+        self._context = out["context"] if self.use_match_context else None
+        actions = {k: out[k][:, -1].squeeze(0) for k in ("movement", "buttons", "value")}
         return actions, (out["hidden"][0], out["hidden"][1])
