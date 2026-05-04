@@ -144,7 +144,7 @@ def save_match_npz(output_dir: Path, stem: str, idx: int,
                    audio_feats: np.ndarray, start: int, end: int):
     f_start = start
     f_end = min(flows.shape[0], end - 1)
-    out = output_dir / f"{stem}_match{idx:07d}.npz"
+    out = output_dir / f"{stem}_match{idx:03d}.npz"
     np.savez_compressed(out,
         flows=flows[f_start:f_end],
         movement=p1_mov[start:end],
@@ -168,7 +168,7 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
                      cfg: Config):
     f_start = start
     f_end = min(flows_u8.shape[0], end - 1)
-    out = output_dir / f"{stem}_match{idx:07d}"
+    out = output_dir / f"{stem}_match{idx:03d}"
     out.mkdir(parents=True, exist_ok=True)
 
     np.save(out / "flow_u8.npy", flows_u8[f_start:f_end])
@@ -216,7 +216,7 @@ def main():
         print(f"No capture subdirectories in {args.capture_dir}")
         return
 
-    suffix_len = len("_match0000000")
+    suffix_len = len("_match000")
     processed = set()
     for p in args.output_dir.iterdir():
         if len(p.name) > suffix_len:
