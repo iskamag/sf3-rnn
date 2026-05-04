@@ -14,6 +14,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data._utils.collate import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -56,6 +57,7 @@ class BCTrainer:
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             context_dim=cfg.context_dim,
+            action_embed_dim=cfg.action_embed_dim,
             mingru_hidden=cfg.mingru_hidden,
             mingru_layers=cfg.mingru_layers,
             mingru_dropout=cfg.mingru_dropout,
@@ -173,13 +175,26 @@ class BCTrainer:
         if context is not None:
             context = context.to(self.device, non_blocking=True)
 
+        B, T = movement.shape
+        mov_oh = F.one_hot(movement, num_classes=self.cfg.num_directions).float()
+        shifted_mov = torch.cat([
+            torch.zeros(B, 1, self.cfg.num_directions, device=self.device),
+            mov_oh[:, :-1],
+        ], dim=1)
+        shifted_btn = torch.cat([
+            torch.zeros(B, 1, self.cfg.num_buttons, device=self.device),
+            buttons[:, :-1],
+        ], dim=1)
+        prev_actions = torch.cat([shifted_mov, shifted_btn], dim=-1)  # (B, T, D)
+
         with torch.amp.autocast(
             device_type=self.device.type,
             dtype=self.amp_dtype,
             enabled=self.use_amp,
         ):
             out = self.model(flows, ego, hidden=hidden,
-                             audio=audio, context=context)
+                             audio=audio, context=context,
+                             prev_actions=prev_actions)
             loss = bc_loss(out, {"movement": movement, "buttons": buttons})
 
         self.optim.zero_grad(set_to_none=True)

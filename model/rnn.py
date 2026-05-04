@@ -103,6 +103,7 @@ class SF3RNN(nn.Module):
                  audio_dim: int = 64,
                  audio_feat_dim: int = 15,
                  context_dim: int = 64,
+                 action_embed_dim: int = 64,
                  mingru_hidden: int = 512,
                  mingru_layers: int = 2,
                  mingru_dropout: float = 0.1,
@@ -114,11 +115,20 @@ class SF3RNN(nn.Module):
         self.mingru_layers = mingru_layers
         self.use_audio = use_audio
         self.context_dim = context_dim
+        self.num_directions = num_directions
+        self.num_buttons = num_buttons
+        self.action_dim = num_directions + num_buttons  # one-hot movement + binary buttons
 
         self.encoder = _FlowEncoder(feature_dim)
 
+        self._action_embed = nn.Sequential(
+            nn.Linear(self.action_dim, action_embed_dim),
+            nn.ReLU(),
+            nn.Linear(action_embed_dim, action_embed_dim),
+        )
+
         # +1 for the ego_player indicator bit (0=P1, 1=P2)
-        recurrent_input = feature_dim + context_dim + 1
+        recurrent_input = feature_dim + context_dim + action_embed_dim + 1
         if use_audio:
             self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
             recurrent_input += audio_dim
@@ -148,6 +158,7 @@ class SF3RNN(nn.Module):
     def reset_hidden(self):
         self.hidden = None
         self._context = None
+        self._prev_action = None
 
     def detach_context(self):
         """Detach the persistent context so gradients don't flow across
@@ -162,6 +173,7 @@ class SF3RNN(nn.Module):
                 hidden: HiddenState = None,
                 audio: Optional[torch.Tensor] = None,          # (B, T, 15) or None
                 context: Optional[torch.Tensor] = None,         # (B, C) initial context
+                prev_actions: Optional[torch.Tensor] = None,    # (B, T, D) or None  D=num_dir+num_btn
                 ) -> Dict[str, torch.Tensor]:
         vis = self.encoder(flows)                             # (B, T, F)
 
@@ -181,7 +193,14 @@ class SF3RNN(nn.Module):
 
         ego = ego_player.unsqueeze(1).expand(-1, T, -1)
         ctx_seq = ctx.unsqueeze(1).expand(-1, T, -1)
-        parts = [vis, ctx_seq, ego]
+
+        if prev_actions is not None:
+            act_emb = self._action_embed(prev_actions)            # (B, T, E)
+        else:
+            act_emb = torch.zeros(B, T, self._action_embed[-1].out_features,
+                                  device=device)
+
+        parts = [vis, ctx_seq, ego, act_emb]
         if self.use_audio:
             parts.insert(1, aud)
         recurrent_in = torch.cat(parts, dim=-1)
@@ -214,9 +233,30 @@ class SF3RNN(nn.Module):
             audio_dim = self.audio_encoder.net[0].in_features
             audio_feats = torch.zeros((1, audio_dim), device=flow.device)
         audio = audio_feats.unsqueeze(1) if audio_feats is not None else None
-        ego = torch.tensor([[ego_player]], device=flow.device, dtype=torch.float32)
+        ego = torch.full((flow.shape[0], 1), ego_player,
+                         device=flow.device, dtype=torch.float32)
+
+        prev = self._prev_action                                          # (B, 15) or None
+        if prev is not None:
+            if prev.device != flow.device:
+                prev = prev.to(flow.device)
+            prev = prev.unsqueeze(1)                                      # (B, 1, 15)
+
         out = self.forward(flow, hidden=hidden, audio=audio,
-                           context=self._context, ego_player=ego)
+                           context=self._context, ego_player=ego,
+                           prev_actions=prev)
         self._context = out["context"]
-        actions = {k: out[k][:, -1].squeeze(0) for k in ("movement", "buttons", "value")}
+
+        mov = out["movement"][:, -1]                                      # (B, 9)
+        btn = out["buttons"][:, -1]                                       # (B, 6)
+        self._prev_action = torch.cat([
+            torch.softmax(mov, dim=-1),
+            torch.sigmoid(btn),
+        ], dim=-1)                                                        # (B, 15)
+
+        actions = {
+            "movement": mov.squeeze(0),
+            "buttons":  btn.squeeze(0),
+            "value":    out["value"][:, -1].squeeze(0),
+        }
         return actions, out["hidden"]

@@ -48,6 +48,7 @@ class Config:
 
     # --- Model ---
     feature_dim: int = 256
+    action_embed_dim: int = 64     # previous-action embedding fed into minGRU
     mingru_hidden: int = 512
     mingru_layers: int = 2
     mingru_dropout: float = 0.1

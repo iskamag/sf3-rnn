@@ -126,6 +126,7 @@ def main():
         use_audio=cfg.use_audio,
         audio_dim=cfg.audio_dim,
         context_dim=cfg.context_dim,
+        action_embed_dim=cfg.action_embed_dim,
         mingru_hidden=cfg.mingru_hidden,
         mingru_layers=cfg.mingru_layers,
         mingru_dropout=cfg.mingru_dropout,
