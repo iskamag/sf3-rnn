@@ -14,7 +14,6 @@ import argparse
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from config import Config
@@ -28,6 +27,15 @@ from train.reward import compute_step_reward, RewardConfig
 from vision.game_state import extract_game_state, GameState
 from env.sf3_env import SF3Env, MssScreenEnv
 from env.audio_capture import AudioCapture, AudioCaptureStub
+
+
+def _reward_config(cfg: Config) -> RewardConfig:
+    return RewardConfig(
+        health_delta=cfg.reward_health_delta,
+        round_win=cfg.reward_round_win,
+        match_win=cfg.reward_match_win,
+        idle=cfg.reward_idle_penalty,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +66,11 @@ def collect_episode(env: SF3Env,
     }
 
     device = next(model.parameters()).device
+    reward_cfg = _reward_config(cfg)
 
     for _ in range(max_steps):
         flow = sensory_buf.get_flow()
         if flow is None:
-            env.step(Direction.NEUTRAL, [])
             frame, _, _, _ = env.step(Direction.NEUTRAL, [])
             sensory_buf.add_frame(frame)
             continue
@@ -93,7 +101,6 @@ def collect_episode(env: SF3Env,
 
         if delayed is None:
             # Pipeline still priming — idle
-            env.step(Direction.NEUTRAL, [])
             frame, _, _, _ = env.step(Direction.NEUTRAL, [])
             sensory_buf.add_frame(frame)
             continue
@@ -109,7 +116,7 @@ def collect_episode(env: SF3Env,
         if prev_state is not None:
             reward = compute_step_reward(
                 prev_state, curr_state, env.is_p1(),
-                RewardConfig(), len(buttons) > 0,
+                reward_cfg, len(buttons) > 0,
             )
         prev_state = curr_state
 
@@ -167,6 +174,7 @@ def main():
             audio_lag=cfg.audio_lag_frames,
             sample_rate=cfg.audio_sample_rate,
             feat_dim=cfg.audio_feat_dim,
+            fps=cfg.fps,
             device=str(device))
         audio_cap = AudioCapture(callback=audio_buf.add_samples,
                                  sample_rate=cfg.audio_sample_rate)

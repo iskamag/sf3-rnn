@@ -7,19 +7,16 @@ sequence so the LSTM's hidden state is respected during the backward pass.
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from config import Config
 from model.rnn import SF3RNN
-from train.reward import compute_returns, RewardConfig
-from vision.game_state import GameState
+from train.reward import compute_returns
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +90,7 @@ class PPOTrainer:
             lstm_dropout=cfg.lstm_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
+            use_match_context=cfg.use_match_context,
         ).to(self.device)
 
         if bc_checkpoint is not None:
@@ -113,23 +111,14 @@ class PPOTrainer:
         batch = self.buffer.get_batch(self.device)
         cfg = self.cfg
 
-        # ---- Run model over the full episode ----
-        kw = {}
-        if cfg.use_audio:
-            kw["audio"] = batch["audio"].unsqueeze(0)
-        out = self.model(batch["flows"].unsqueeze(0),
-                          torch.zeros(1, 1, device=self.device),
-                          context=None, **kw)
-        new_mov = out["movement"].squeeze(0)          # (T, 9)
-        new_btn = out["buttons"].squeeze(0)           # (T, 6)
-        new_val = out["value"].squeeze(0)             # (T,)
-
-        # ---- Advantages & returns (GAE) ----
+        # ---- Advantages & returns from rollout-time values ----
         advantages, returns = compute_returns(
             batch["rewards"], batch["dones"],
             gamma=cfg.gamma, gae_lambda=cfg.gae_lambda,
-            values=torch.cat([batch["values"], new_val[-1:]]),
+            values=batch["values"].detach(),
         )
+        advantages = advantages.detach()
+        returns = returns.detach()
 
         total_loss = 0.0
         total_policy = 0.0
@@ -137,18 +126,28 @@ class PPOTrainer:
         total_entropy = 0.0
 
         for _ in range(cfg.ppo_updates):
+            kw = {}
+            if cfg.use_audio:
+                kw["audio"] = batch["audio"].unsqueeze(0)
+            out = self.model(batch["flows"].unsqueeze(0),
+                             torch.zeros(1, 1, device=self.device),
+                             context=None, **kw)
+            new_mov = out["movement"].squeeze(0)      # (T, 9)
+            new_btn = out["buttons"].squeeze(0)       # (T, 6)
+            new_val = out["value"].squeeze(0)         # (T,)
+
             # ---- Policy loss (movement + buttons) ----
             mov_dist = torch.distributions.Categorical(logits=new_mov)
             mov_logp = mov_dist.log_prob(batch["movement"])
 
             # Buttons: independent Bernoulli log-prob
-            btn_probs = torch.sigmoid(new_btn)
-            btn_logp = torch.distributions.Bernoulli(btn_probs).log_prob(
+            btn_dist = torch.distributions.Bernoulli(logits=new_btn)
+            btn_logp = btn_dist.log_prob(
                 batch["buttons"].clamp(0, 1)
             ).sum(-1)
 
             logp = mov_logp + btn_logp
-            entropy = mov_dist.entropy().mean()
+            entropy = mov_dist.entropy().mean() + btn_dist.entropy().sum(-1).mean()
 
             ratio = torch.exp(logp - batch["old_log_probs"])
             clipped = torch.clamp(ratio, 1 - cfg.ppo_clip_eps, 1 + cfg.ppo_clip_eps)
