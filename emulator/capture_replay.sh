@@ -5,7 +5,7 @@
 #   ./emulator/capture_replay.sh <challenge_id> [game]
 #
 # Output (data/captures/<challenge_id>/):
-#   video.mkv      — 128×128 grayscale MJPEG, 60 fps
+#   video.mkv      — native-resolution lossless H.264, 60 fps
 #   audio.wav      — 8-bit mono 16 kHz PCM
 #   input_log.txt  — per-frame inputs + health from Lua
 
@@ -108,9 +108,11 @@ gst-launch-1.0 -e \
     ! videorate \
     ! video/x-raw,framerate=60/1 \
     ! videoscale \
-    ! video/x-raw,width=128,height=128,format=GRAY8 \
-    ! jpegenc quality=92 \
-    ! jpegparse \
+    ! video/x-raw,width=384,height=224 \
+    ! videoconvert \
+    ! video/x-raw,format=I420 \
+    ! x264enc speed-preset=ultrafast tune=zerolatency pass=quant quantizer=0 key-int-max=60 \
+    ! h264parse \
     ! matroskamux \
     ! filesink location="$OUT_DIR/video.mkv" \
     2>/tmp/st_rnn_gst_err &

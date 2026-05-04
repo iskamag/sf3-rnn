@@ -136,14 +136,14 @@ The last segment (`1777806845400-9194`) is the challenge ID.
 What happens:
 1. `gamescope` launches the emulator with `input_log.lua`
 2. A screencast dialog appears — **accept it**
-3. `pw-v4l2 ffmpeg` captures the gamescope window as 128×128 grayscale
-   H.264 video + 8-bit 16 kHz mono WAV audio
+3. GStreamer captures the gamescope window as native-resolution lossless H.264
+   video + 8-bit 16 kHz mono WAV audio
 4. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
    timer, and wins to `input_log.txt`
 
 Output in `data/captures/1777806845400-9194/`:
 ```
-video.mkv       — 128×128 grayscale, 60 fps, H.264 VAAPI
+video.mkv       — 384×224 lossless H.264, 60 fps
 audio.wav       — 8-bit mono 16 kHz PCM
 input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 ```
@@ -153,9 +153,9 @@ Aim for at least 50–100 matches for BC training to be useful.
 
 ### 3. Process into training data
 
-Converts the captures into `.npz` files the dataset can read.  Each `.npz`
-contains one match (character select / intros trimmed automatically via
-health-bar transitions).
+Converts the captures into mmap-friendly shard directories the dataset can
+read. Each shard contains one match (character select / intros trimmed
+automatically via health-bar transitions).
 
 ```bash
 python scripts/collect_data.py \
@@ -163,22 +163,23 @@ python scripts/collect_data.py \
     --output-dir data/processed
 ```
 
-Output: `data/processed/<id>_match00.npz`, `..._match01.npz`, etc.
+Output: `data/processed/<id>_match00/`, `..._match01/`, etc.
 
-Contents of each `.npz`:
+Contents of each shard:
 
 | Array          | Shape              | Description                          |
 |----------------|--------------------|--------------------------------------|
-| `flows`        | (T, 2, 128, 128)   | Farneback optical flow, normalised  |
-| `movement`     | (T,)               | P1 direction index 0–8              |
-| `buttons`      | (T, 6)             | P1 button states {0, 1}             |
-| `p2_movement`  | (T,)               | P2 direction index (raw, no mirror) |
-| `p2_buttons`   | (T, 6)             | P2 button states                    |
-| `health_p1`    | (T,)               | P1 health 0–1 (from Lua memory)     |
-| `health_p2`    | (T,)               | P2 health 0–1                       |
-| `stun_p1`      | (T,)               | P1 hitstun {0, 1}                   |
-| `stun_p2`      | (T,)               | P2 hitstun {0, 1}                   |
-| `audio`        | (T, 15)            | MFCC + energy features              |
+| `flow_u8.npy`       | (T-1, 2, 128, 128) | Farneback optical flow, clipped to [-1, 1] and uint8-quantized |
+| `audio_f16.npy`     | (T, 15)             | MFCC + energy features, float16    |
+| `movement_u8.npy`   | (T,)                | P1 direction index 0–8             |
+| `buttons_u8.npy`    | (T, 6)              | P1 button states {0, 1}            |
+| `p2_movement_u8.npy`| (T,)                | P2 direction index (raw, no mirror)|
+| `p2_buttons_u8.npy` | (T, 6)              | P2 button states                   |
+| `health_p1_u8.npy`  | (T,)                | P1 health 0–255                    |
+| `health_p2_u8.npy`  | (T,)                | P2 health 0–255                    |
+| `stun_p1_u8.npy`    | (T,)                | P1 hitstun {0, 1}                  |
+| `stun_p2_u8.npy`    | (T,)                | P2 hitstun {0, 1}                  |
+| `meta.json`         | —                   | Quantization and source metadata   |
 
 ### 4. Behaviour cloning
 

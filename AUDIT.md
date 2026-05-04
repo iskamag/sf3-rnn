@@ -14,6 +14,8 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 - Removed duplicate environment steps during PPO priming and wired reward collection to `Config` reward weights.
 - Reduced BC dataset overhead with configurable segment stride and per-worker decompressed `.npz` caching.
 - Made `MatchContext` opt-in so the default model path can use vectorized LSTM execution.
+- Switched the preferred processed dataset format from compressed `.npz` to mmap-friendly shard directories with uint8-quantized flow and float16 audio features.
+- Changed replay video capture from 128px JPEG frames to native-resolution lossless H.264 cache video, avoiding macroblocking before optical-flow preprocessing without using FFV1.
 
 ## Critical Runtime Breakages
 
@@ -37,8 +39,9 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 ## Dataset And IO Bottlenecks
 
 - `ReplayDataset` now supports coarser segment sampling and caches decompressed `.npz` arrays per worker.
-- Processed data is still saved with `np.savez_compressed()`. This saves disk but remains suboptimal for large random-access optical-flow tensors.
-- Remaining better path: uncompressed `.npy`/memmap shards or a consolidated dataset format with explicit sequence indexes.
+- `ReplayDataset` now prefers shard directories and memory-maps their `.npy` arrays. Legacy `.npz` files still work for old processed data.
+- Processed flow is stored as `flow_u8.npy`, clipped to [-1, 1] after normalization and quantized to uint8. Training dequantizes only the requested window.
+- Remaining better path: add manifest-driven raw capture management so match IDs define the canonical dataset and captures/shards are treated as rebuildable caches.
 
 ## Model Bloat And Mismatched Intent
 
@@ -61,6 +64,6 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 
 1. Update launch/capture scripts to use `bot_bridge.lua` for live bot runs.
 2. Calibrate and test HUD ROIs against actual Fightcade captures.
-3. Replace compressed `.npz` training data with memory-mapped shards if caching/stride are not enough.
+3. Add manifest-driven capture/shard cache management from Fightcade match IDs.
 4. Add dependency-backed smoke tests for model step, dataset loading, audio buffering, and the Lua bridge contract.
 5. Decide whether `MatchContext` is worth keeping before training checkpoints that depend on it.
