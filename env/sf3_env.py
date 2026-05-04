@@ -1,26 +1,21 @@
-"""SF3 environment — abstracts the emulator / screen-capture backend.
+"""SF3 environment for Fightcade FBNeo.
 
-Two backends included:
-  1.  MssScreenEnv   — screen capture via mss + input via pynput
-  2.  RetroArchEnv   — libretro FBNeo core via subprocess (retroarch + netplay stub)
-
-Both expose the same interface so the training / inference code doesn't care
-which one is wired up.
+Screen frames are captured from the desktop with mss. Inputs are sent through
+the FBNeo Lua bridge (`emulator/bot_bridge.lua`) by writing CPS3 bitfields to a
+command file that Lua polls once per frame.
 """
 
 from __future__ import annotations
 
-import subprocess
-import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Tuple
 
 import cv2
 import numpy as np
-import torch
 
 from config import Config
-from model.action_space import Direction, Button, bitfield_to_action
+from model.action_space import Direction, Button, action_to_bitfield
 
 
 # ---------------------------------------------------------------------------
@@ -67,18 +62,17 @@ class SF3Env(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Screen-capture backend (works with Fightcade / RetroArch desktop windows)
+# Screen-capture backend for Fightcade / FBNeo windows
 # ---------------------------------------------------------------------------
 class MssScreenEnv(SF3Env):
-    """Captures the desktop region containing the game window and injects
-    virtual-keyboard / virtual-joystick inputs via pynput."""
+    """Capture the game window and send inputs through the FBNeo Lua bridge."""
 
     def __init__(self, cfg: Config, monitor: dict | None = None):
         self.cfg = cfg
         self.monitor = monitor or {"top": 0, "left": 0, "width": 1280, "height": 960}
         self._p1 = True
         self._mss = None
-        self._input_device = None
+        self._input_path = Path(cfg.fbneo_input_path)
 
     def reset(self) -> np.ndarray:
         import mss
@@ -108,65 +102,8 @@ class MssScreenEnv(SF3Env):
         return SF3Env.resize_frame(img, self.cfg.native_height, self.cfg.native_width)
 
     def _send_input(self, direction: Direction, buttons: list[Button]):
-        # Implement with pynput / vgamepad / keyboard according to your setup.
-        # Placeholder — the actual mapping depends on emulator keybindings.
-        pass
-
-
-# ---------------------------------------------------------------------------
-# libretro / RetroArch backend
-# ---------------------------------------------------------------------------
-class RetroArchEnv(SF3Env):
-    """Launch RetroArch with the FBNeo core and communicate via stdio / TCP.
-
-    Requires `retroarch` on PATH and a valid `fbneo` core library.
-    """
-
-    def __init__(self, cfg: Config,
-                 core_path: str = "/usr/lib/libretro/fbneo_libretro.so",
-                 rom_path: str = "sfiii3.zip",
-                 port: int = 55355):
-        self.cfg = cfg
-        self.core_path = core_path
-        self.rom_path = rom_path
-        self.port = port
-        self.proc = None
-        self._p1 = True
-
-    def reset(self) -> np.ndarray:
-        self._launch()
-        # Wait for game to boot …
-        time.sleep(3)
-        return self._read_frame()
-
-    def step(self, direction: Direction,
-             buttons: list[Button]) -> Tuple[np.ndarray, float, bool, dict]:
-        self._write_input(direction, buttons)
-        frame = self._read_frame()
-        return frame, 0.0, False, {}
-
-    def close(self):
-        if self.proc:
-            self.proc.kill()
-            self.proc = None
-
-    def is_p1(self) -> bool:
-        return self._p1
-
-    # ------------------------------------------------------------------
-    def _launch(self):
-        self.proc = subprocess.Popen([
-            "retroarch",
-            "-L", self.core_path,
-            self.rom_path,
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    def _read_frame(self) -> np.ndarray:
-        # Stub — real implementation reads from libretro video buffer
-        # via the network bridge or shared memory.
-        return np.zeros((self.cfg.native_height, self.cfg.native_width, 3),
-                        dtype=np.uint8)
-
-    def _write_input(self, direction: Direction, buttons: list[Button]):
-        # Stub — send via RetroArch network commands
-        pass
+        bits = action_to_bitfield(direction, buttons)
+        self._input_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._input_path.with_suffix(self._input_path.suffix + ".tmp")
+        tmp.write_text(f"{bits}\n")
+        tmp.replace(self._input_path)

@@ -7,3 +7,4 @@ gymnasium>=0.29
 tensorboard>=2.13
 psutil>=5.9
 sounddevice>=0.4
+mss>=9.0

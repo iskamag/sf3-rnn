@@ -8,6 +8,15 @@ class Config:
     fps: int = 60
     native_width: int = 384
     native_height: int = 224
+    frame_size: int = 128
+    flow_norm: float = 20.0
+
+    # Native-resolution HUD ROIs: (x, y, width, height). These are defaults
+    # for SFIII 3S/Fightcade captures and may need calibration per crop.
+    p1_health_roi: tuple[int, int, int, int] = (31, 17, 127, 8)
+    p2_health_roi: tuple[int, int, int, int] = (226, 17, 127, 8)
+    p1_stun_roi: tuple[int, int, int, int] = (31, 31, 127, 5)
+    p2_stun_roi: tuple[int, int, int, int] = (226, 31, 127, 5)
 
     # --- Reaction-time constraint ---
     # Human pipelines have different latencies:
@@ -47,6 +56,7 @@ class Config:
     # --- Training ---
     batch_size: int = 32
     seq_len: int = 128           # frames per training segment  (~2 s)
+    segment_stride: int = 4      # reduce highly-overlapping BC windows
     lr: float = 1e-4
     weight_decay: float = 1e-5
     bc_epochs: int = 100
@@ -57,6 +67,7 @@ class Config:
     # across BC segments (detached) and full PPO episodes, accumulating
     # an opponent profile:  tendencies, habits, adaptation.
     context_dim: int = 64
+    use_match_context: bool = False
 
     # --- PPO fine-tuning ---
     ppo_clip_eps: float = 0.2
@@ -86,6 +97,11 @@ class Config:
         ("NEUTRAL",  (),        60),    # wait for screen to settle
         ("NEUTRAL",  ("LP",),   10),    # confirm default character (Ryu)
     )
+
+    # --- Fightcade FBNeo Lua bridge ---
+    # emulator/bot_bridge.lua reads this file once per frame and applies P1 input.
+    fbneo_input_path: Path = field(
+        default_factory=lambda: Path.home() / "fightcade-emu" / "bot_input.txt")
 
     # --- Paths ---
     data_dir: Path = field(default_factory=lambda: Path("data"))
