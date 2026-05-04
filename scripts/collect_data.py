@@ -144,7 +144,7 @@ def save_match_npz(output_dir: Path, stem: str, idx: int,
                    audio_feats: np.ndarray, start: int, end: int):
     f_start = start
     f_end = min(flows.shape[0], end - 1)
-    out = output_dir / f"{stem}_match{idx:02d}.npz"
+    out = output_dir / f"{stem}_match{idx:07d}.npz"
     np.savez_compressed(out,
         flows=flows[f_start:f_end],
         movement=p1_mov[start:end],
@@ -168,7 +168,7 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
                      cfg: Config):
     f_start = start
     f_end = min(flows_u8.shape[0], end - 1)
-    out = output_dir / f"{stem}_match{idx:02d}"
+    out = output_dir / f"{stem}_match{idx:07d}"
     out.mkdir(parents=True, exist_ok=True)
 
     np.save(out / "flow_u8.npy", flows_u8[f_start:f_end])
@@ -211,9 +211,20 @@ def main():
     cfg = Config()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    dirs = sorted(d for d in args.capture_dir.iterdir() if d.is_dir())
-    if not dirs:
+    all_captures = {d.name for d in args.capture_dir.iterdir() if d.is_dir()}
+    if not all_captures:
         print(f"No capture subdirectories in {args.capture_dir}")
+        return
+
+    suffix_len = len("_match0000000")
+    processed = set()
+    for p in args.output_dir.iterdir():
+        if len(p.name) > suffix_len:
+            processed.add(p.name[:-suffix_len])
+
+    dirs = sorted(args.capture_dir / name for name in all_captures - processed)
+    if not dirs:
+        print("All captures already processed.")
         return
 
     total_matches = 0
