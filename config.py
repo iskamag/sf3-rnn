@@ -74,6 +74,8 @@ class Config:
     ppo_clip_eps: float = 0.2
     ppo_updates: int = 10
     ppo_minibatch: int = 256
+    ppo_seq_len: int = 128
+    ppo_prioritized_segments: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
     ent_coef: float = 0.01

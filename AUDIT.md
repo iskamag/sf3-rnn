@@ -17,6 +17,7 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 - Switched the preferred processed dataset format from compressed `.npz` to mmap-friendly shard directories with uint8-quantized flow and float16 audio features.
 - Changed replay video capture from 128px JPEG frames to native-resolution lossless H.264 cache video, avoiding macroblocking before optical-flow preprocessing without using FFV1.
 - Changed model flow input from square 128x128 to aspect-preserving 160x120; there is no meaningful power-of-two requirement for the CNN path.
+- Changed PPO updates from full-episode passes to recurrent sequence chunks that honor `ppo_minibatch` and optionally sample chunks by mean absolute advantage.
 
 ## Critical Runtime Breakages
 
@@ -34,7 +35,8 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 ## Training And PPO Issues
 
 - PPO no longer passes `T + 1` values into `compute_returns()` or reuses the same autograd graph for multiple updates.
-- PPO still updates over the full episode as one sequence. This preserves LSTM ordering but does not use `ppo_minibatch`; long episodes may need truncated sequence minibatches.
+- PPO now uses truncated recurrent sequence chunks with detached chunk-start hidden states, so long episodes no longer require full-episode backprop.
+- Segment sampling can prioritize high-absolute-advantage chunks, loosely following the useful replay idea from PufferLib without depending on its CUDA backend.
 - PPO still depends on the live Fightcade/Lua environment being calibrated and tested end-to-end.
 
 ## Dataset And IO Bottlenecks
@@ -49,6 +51,7 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 - `MatchContext` is now opt-in. The default path keeps the context input shape but fills it with zeros and runs the LSTM over the full sequence in one call.
 - If match profiling is re-enabled, BC segment ordering must preserve chronology and the context persistence behavior should be tested explicitly.
 - Keeping the `MatchContext` module preserves checkpoint compatibility for now, but it can be removed later if no trained checkpoints need it.
+- PufferLib's MinGRU is worth evaluating as a future recurrent core, but its speed comes partly from custom kernels and parallel scan behavior. A naive PyTorch MinGRU should be benchmarked before replacing the current LSTM.
 
 ## Audio Alignment
 

@@ -272,6 +272,8 @@ All tunables in `config.py`:
 | `seq_len`              | 128     | BC training segment length           |
 | `lr`                   | 1e-4    | Learning rate                        |
 | `ppo_clip_eps`         | 0.2     | PPO clip epsilon                     |
+| `ppo_seq_len`          | 128     | PPO recurrent update chunk length    |
+| `ppo_minibatch`        | 256     | PPO target timesteps per update      |
 
 ## CPS3 input bitfield
 

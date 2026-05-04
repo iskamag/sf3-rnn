@@ -106,10 +106,61 @@ class PPOTrainer:
         self.step = 0
 
     # ------------------------------------------------------------------
+    def _forward_chunk(self, batch: dict[str, torch.Tensor], start: int, end: int,
+                       hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+                       ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                                  tuple[torch.Tensor, torch.Tensor]]:
+        kw = {}
+        if self.cfg.use_audio:
+            kw["audio"] = batch["audio"][start:end].unsqueeze(0)
+        out = self.model(
+            batch["flows"][start:end].unsqueeze(0),
+            torch.zeros(1, 1, device=self.device),
+            hidden=hidden,
+            context=None,
+            **kw,
+        )
+        return (out["movement"].squeeze(0),
+                out["buttons"].squeeze(0),
+                out["value"].squeeze(0),
+                out["hidden"])
+
+    @torch.no_grad()
+    def _chunk_initial_hiddens(self, batch: dict[str, torch.Tensor],
+                               starts: list[int], seq_len: int,
+                               ) -> dict[int, Optional[tuple[torch.Tensor, torch.Tensor]]]:
+        hiddens: dict[int, Optional[tuple[torch.Tensor, torch.Tensor]]] = {}
+        hidden = None
+        T = len(batch["rewards"])
+        for start in starts:
+            hiddens[start] = None if hidden is None else tuple(h.detach() for h in hidden)
+            _, _, _, hidden = self._forward_chunk(batch, start, min(start + seq_len, T), hidden)
+        return hiddens
+
+    def _sample_starts(self, starts: list[int], advantages: torch.Tensor,
+                       seq_len: int, chunks_per_update: int) -> list[int]:
+        if not self.cfg.ppo_prioritized_segments:
+            order = torch.randperm(len(starts), device=self.device)[:chunks_per_update]
+            return [starts[int(i)] for i in order]
+
+        weights = torch.tensor([
+            advantages[start:start + seq_len].abs().mean().item() + 1e-6
+            for start in starts
+        ], device=self.device)
+        idx = torch.multinomial(
+            weights / weights.sum(), chunks_per_update,
+            replacement=chunks_per_update > len(starts),
+        )
+        return [starts[int(i)] for i in idx]
+
     def update(self) -> dict[str, float]:
-        """One PPO epoch over the collected buffer."""
+        """Run PPO updates over recurrent sequence chunks from the buffer."""
         batch = self.buffer.get_batch(self.device)
         cfg = self.cfg
+        T = len(batch["rewards"])
+        seq_len = min(cfg.ppo_seq_len, T)
+        starts = list(range(0, T, seq_len))
+        chunks_per_update = max(1, min(len(starts), cfg.ppo_minibatch // seq_len))
 
         # ---- Advantages & returns from rollout-time values ----
         advantages, returns = compute_returns(
@@ -126,38 +177,44 @@ class PPOTrainer:
         total_entropy = 0.0
 
         for _ in range(cfg.ppo_updates):
-            kw = {}
-            if cfg.use_audio:
-                kw["audio"] = batch["audio"].unsqueeze(0)
-            out = self.model(batch["flows"].unsqueeze(0),
-                             torch.zeros(1, 1, device=self.device),
-                             context=None, **kw)
-            new_mov = out["movement"].squeeze(0)      # (T, 9)
-            new_btn = out["buttons"].squeeze(0)       # (T, 6)
-            new_val = out["value"].squeeze(0)         # (T,)
+            chunk_hiddens = self._chunk_initial_hiddens(batch, starts, seq_len)
+            selected = self._sample_starts(starts, advantages, seq_len, chunks_per_update)
 
-            # ---- Policy loss (movement + buttons) ----
-            mov_dist = torch.distributions.Categorical(logits=new_mov)
-            mov_logp = mov_dist.log_prob(batch["movement"])
+            losses = []
+            policy_losses = []
+            value_losses = []
+            entropies = []
 
-            # Buttons: independent Bernoulli log-prob
-            btn_dist = torch.distributions.Bernoulli(logits=new_btn)
-            btn_logp = btn_dist.log_prob(
-                batch["buttons"].clamp(0, 1)
-            ).sum(-1)
+            for start in selected:
+                end = min(start + seq_len, T)
+                new_mov, new_btn, new_val, _ = self._forward_chunk(
+                    batch, start, end, chunk_hiddens[start])
 
-            logp = mov_logp + btn_logp
-            entropy = mov_dist.entropy().mean() + btn_dist.entropy().sum(-1).mean()
+                mov_dist = torch.distributions.Categorical(logits=new_mov)
+                mov_logp = mov_dist.log_prob(batch["movement"][start:end])
 
-            ratio = torch.exp(logp - batch["old_log_probs"])
-            clipped = torch.clamp(ratio, 1 - cfg.ppo_clip_eps, 1 + cfg.ppo_clip_eps)
-            policy_loss = -torch.min(ratio * advantages, clipped * advantages).mean()
+                btn_dist = torch.distributions.Bernoulli(logits=new_btn)
+                btn_logp = btn_dist.log_prob(
+                    batch["buttons"][start:end].clamp(0, 1)
+                ).sum(-1)
 
-            value_loss = F.mse_loss(new_val, returns)
+                logp = mov_logp + btn_logp
+                entropy = mov_dist.entropy().mean() + btn_dist.entropy().sum(-1).mean()
 
-            loss = (policy_loss +
-                    cfg.vf_coef * value_loss -
-                    cfg.ent_coef * entropy)
+                ratio = torch.exp(logp - batch["old_log_probs"][start:end])
+                clipped = torch.clamp(ratio, 1 - cfg.ppo_clip_eps, 1 + cfg.ppo_clip_eps)
+                policy_loss = -torch.min(
+                    ratio * advantages[start:end],
+                    clipped * advantages[start:end],
+                ).mean()
+
+                value_loss = F.mse_loss(new_val, returns[start:end])
+                losses.append(policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy)
+                policy_losses.append(policy_loss.detach())
+                value_losses.append(value_loss.detach())
+                entropies.append(entropy.detach())
+
+            loss = torch.stack(losses).mean()
 
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -165,9 +222,9 @@ class PPOTrainer:
             self.optim.step()
 
             total_loss += loss.item()
-            total_policy += policy_loss.item()
-            total_value += value_loss.item()
-            total_entropy += entropy.item()
+            total_policy += torch.stack(policy_losses).mean().item()
+            total_value += torch.stack(value_losses).mean().item()
+            total_entropy += torch.stack(entropies).mean().item()
 
         self.buffer.reset()
         n = cfg.ppo_updates
