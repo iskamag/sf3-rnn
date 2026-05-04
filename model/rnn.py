@@ -1,13 +1,16 @@
 """CNN + (optional) Audio + MatchContext -> minGRU policy model for SF3.
 
-Visual:    N optical-flow frames  → FlowCNN      → N × feature_dim
-Audio:     N MFCC+energy frames   → pool → AudioMLP → audio_dim
-Context:   minGRU output          → MatchContext  → context_dim
-Fused:     [pool(vis), pool(aud), ctx, ego, pool(prev_actions)]  → minGRU
-                                                                  → [flow_feat | hidden] → N action heads
+Visual:    N optical-flow frames  →  pool  →  FlowCNN  →  feature_dim
+Audio:     N MFCC+energy frames   →  pool  →  AudioMLP →  audio_dim
+Context:   minGRU output          →  MatchContext  →  context_dim
+Fused:     [vis, aud, ctx, ego, prev_actions]  →  minGRU
+                                                    →  [hidden + pos_embedₙ] → N action heads
 
 The model runs once per *temporal_stride* (N) frames and produces N consecutive
 action sets in one recurrence step — matching the human ~67 ms decision cadence.
+
+Per-frame variation comes from a learned sub-frame position embedding, not
+per-frame CNN features — this cuts CNN FLOPs by N× (4× at default stride).
 """
 
 from __future__ import annotations
@@ -160,8 +163,12 @@ class SF3RNN(nn.Module):
         self.recurrent = _MinGRUStack(recurrent_input, mingru_hidden,
                                        mingru_layers, mingru_dropout)
 
-        # Project [hidden | flow_feat] → hidden for the action heads
-        self._action_proj = nn.Linear(mingru_hidden + feature_dim, mingru_hidden)
+        # Per-subframe position embedding — replaces per-frame CNN features
+        # so the action heads can vary outputs within the stride window.
+        self._subframe_pos = nn.Parameter(torch.zeros(temporal_stride, mingru_hidden))
+
+        # Action head projection: hidden → hidden (no flow concat needed)
+        self._action_proj = nn.Linear(mingru_hidden, mingru_hidden)
 
         head = [mingru_hidden, mingru_hidden // 2]
         self.movement_head = nn.Sequential(
@@ -197,12 +204,12 @@ class SF3RNN(nn.Module):
                 context: Optional[torch.Tensor] = None,         # (B, C) initial context
                 prev_actions: Optional[torch.Tensor] = None,    # (B, T, N, D)  D=num_dir+num_btn
                 ) -> Dict[str, torch.Tensor]:
-        # --- visual ---
-        # flows: (B, T, N, 2, H, W)  →  flat: (B*T*N, 2, H, W)  →  feats: (B*T*N, F)
-        # reshaped back to (B, T, N, F)
         B, T, N = flows.shape[:3]
         device = flows.device
-        flow_feats = self._encoder_flat(flows, (B, T, N))             # (B, T, N, F)
+
+        # --- visual: pool N flow frames → 1 representative frame → CNN once ---
+        flow_pooled_frames = flows.mean(dim=2)                     # (B, T, 2, H, W)
+        flow_feat = self.encoder(flow_pooled_frames)               # (B, T, F)
 
         # --- audio ---
         aud_pooled = None
@@ -226,27 +233,24 @@ class SF3RNN(nn.Module):
 
         # --- previous actions ---
         if prev_actions is not None:
-            # Embed each of the N actions, then pool across N
             act_emb = self._action_embed(prev_actions)                 # (B, T, N, E)
             act_emb = act_emb.mean(dim=2)                              # (B, T, E)
         else:
             act_emb = torch.zeros(B, T, self._action_embed[-1].out_features,
                                   device=device)
 
-        # --- pooled flow for recurrence ---
-        flow_pooled = flow_feats.mean(dim=2)                           # (B, T, F)
-
         # --- recurrent core ---
         ctx_seq = ctx.unsqueeze(1).expand(-1, T, -1)                  # (B, T, C)
-        parts = [flow_pooled, ctx_seq, ego, act_emb]
+        parts = [flow_feat, ctx_seq, ego, act_emb]
         if aud_pooled is not None:
             parts.insert(1, aud_pooled)
         recurrent_in = torch.cat(parts, dim=-1)
         recurrent_out, hidden = self.recurrent(recurrent_in, hidden)   # (B, T, H)
 
-        # --- action decoder: [hidden | flow_feat] per frame ---
-        h_exp = recurrent_out.unsqueeze(2).expand(-1, -1, N, -1)      # (B, T, N, H)
-        slot_in = self._action_proj(torch.cat([h_exp, flow_feats], dim=-1))  # (B, T, N, H)
+        # --- action decoder: hidden + subframe position embedding ---
+        pos = self._subframe_pos.unsqueeze(0).unsqueeze(0)             # (1, 1, N, H)
+        h_exp = recurrent_out.unsqueeze(2) + pos                       # (B, T, N, H)
+        slot_in = self._action_proj(h_exp)                             # (B, T, N, H)
 
         # --- update context ---
         ctx = self.match_context(recurrent_out[:, -1], ctx)
@@ -307,15 +311,3 @@ class SF3RNN(nn.Module):
             "value":    out["value"][:, -1].squeeze(0),                    # (N,)
         }
         return actions, out["hidden"]
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    def _encoder_flat(self, flows: torch.Tensor, lead_shape: tuple) -> torch.Tensor:
-        """Encode flow frames with arbitrary leading batch dims."""
-        lead = flows.shape[:-3]                            # e.g. (B, T, N)
-        flat = flows.reshape(-1, 2, flows.shape[-2], flows.shape[-1])
-        h = self.encoder.conv(flat)
-        h = self.encoder.pool(h).flatten(1)
-        feats = self.encoder.fc(h)
-        return feats.reshape(*lead, -1)                    # (B, T, N, F)
