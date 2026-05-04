@@ -199,7 +199,7 @@ def main():
             flow = sensory_buf.get_flow()
             if flow is not None:
                 audio_feats = audio_buf.get_features() if audio_buf is not None else None
-                with torch.no_grad():
+                with torch.inference_mode():
                     actions, hidden = model.step(flow, model.hidden,
                                                  audio_feats=audio_feats)
                     model.hidden = hidden
