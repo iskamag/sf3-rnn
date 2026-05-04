@@ -28,14 +28,17 @@ AUDIO_PID=""
 _cleanup() {
     echo ""
     echo "Cleaning up …"
+    # Copy input log first, before killing the emulator (the Lua script
+    # calls out:flush() after each frame, so the file is always current)
+    if [ -f "$EMU_DIR/input_log.txt" ]; then
+        cp "$EMU_DIR/input_log.txt" "$OUT_DIR/input_log.txt"
+        echo "  input_log.txt saved ($(wc -l < "$OUT_DIR/input_log.txt") frames)"
+    fi
     [ -n "${GST_PID:-}" ] && kill $GST_PID 2>/dev/null || true
     [ -n "${AUDIO_PID:-}" ] && kill $AUDIO_PID 2>/dev/null || true
     [ -n "$EMU_PID" ] && kill $EMU_PID 2>/dev/null || true
     wait 2>/dev/null || true
     rm -f /tmp/st_rnn_y4m
-    if [ -f "$EMU_DIR/input_log.txt" ]; then
-        cp "$EMU_DIR/input_log.txt" "$OUT_DIR/input_log.txt"
-    fi
 }
 trap _cleanup EXIT
 
@@ -48,7 +51,7 @@ rm -f "$EMU_DIR/input_log.txt"
 # ---- Launch emulator ----
 echo "[1/3] Launching emulator (gamescope) …"
 gamescope \
-    -W 640 -H 524 -r 60 \
+    -W 640 -H 480 -r 60 \
     -- wine "$EMU_DIR/fcadefbneo.exe" \
     "quark:stream,$GAME,$CHALLENGE_ID.2,7100" \
     -q -lua input_log.lua &
@@ -100,7 +103,7 @@ AUDIO_PID=$!
 
 gst-launch-1.0 -e \
     pipewiresrc path="$PWNODE" do-timestamp=true \
-    ! videocrop top=44 \
+    ! videocrop top=0 \
     ! videoconvert \
     ! videorate \
     ! video/x-raw,framerate=60/1 \
@@ -121,3 +124,9 @@ fi
 # ---- Wait ----
 echo "Recording — press Ctrl+C when replay ends, or wait …"
 wait $EMU_PID 2>/dev/null || true
+
+# ---- Copy input log ----
+if [ -f "$EMU_DIR/input_log.txt" ]; then
+    cp "$EMU_DIR/input_log.txt" "$OUT_DIR/input_log.txt"
+    echo "  input_log.txt saved ($(wc -l < "$OUT_DIR/input_log.txt") frames)"
+fi
