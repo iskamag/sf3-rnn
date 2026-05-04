@@ -10,11 +10,11 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 ┌─────────────────────────────────────────────────────────────┐
 │  screen capture                         audio capture       │
 │      ↓                                       ↓              │
-│  Greyscale resize (128 × 128)         16 kHz mono           │
+│  Greyscale resize (160 × 120)         16 kHz mono           │
 │      ↓                                       ↓              │
 │  ReactionBuffer — visual lag 8 f       AudioBuffer — 3 f    │
 │      ↓                                       ↓              │
-│  Farneback OF  (2-ch, 128×128)        MFCC+energy  (15-d)  │
+│  Farneback OF  (2-ch, 160×120)        MFCC+energy  (15-d)  │
 │      ↓                                       ↓              │
 │  FlowCNN → 256-d                       AudioMLP → 64-d      │
 │      ↓                                       ↓              │
@@ -143,7 +143,7 @@ What happens:
 
 Output in `data/captures/1777806845400-9194/`:
 ```
-video.mkv       — 384×224 lossless H.264, 60 fps
+video.mkv       — 640×480 lossless H.264, 60 fps
 audio.wav       — 8-bit mono 16 kHz PCM
 input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 ```
@@ -169,7 +169,7 @@ Contents of each shard:
 
 | Array          | Shape              | Description                          |
 |----------------|--------------------|--------------------------------------|
-| `flow_u8.npy`       | (T-1, 2, 128, 128) | Farneback optical flow, clipped to [-1, 1] and uint8-quantized |
+| `flow_u8.npy`       | (T-1, 2, 120, 160) | Farneback optical flow, clipped to [-1, 1] and uint8-quantized |
 | `audio_f16.npy`     | (T, 15)             | MFCC + energy features, float16    |
 | `movement_u8.npy`   | (T,)                | P1 direction index 0–8             |
 | `buttons_u8.npy`    | (T, 6)              | P1 button states {0, 1}            |
@@ -262,6 +262,8 @@ All tunables in `config.py`:
 | `motor_lag_frames`     | 4       | Motor/output delay (frames)          |
 | `total_delay_frames`   | 12      | Visual total ≈ 200 ms @ 60 fps       |
 | `use_audio`            | True    | Enable audio pipeline                |
+| `frame_width`          | 160     | Model optical-flow input width       |
+| `frame_height`         | 120     | Model optical-flow input height      |
 | `context_dim`          | 64      | MatchContext opponent-profile size   |
 | `feature_dim`          | 256     | Visual feature dimension             |
 | `audio_dim`            | 64      | Audio embedding dimension            |

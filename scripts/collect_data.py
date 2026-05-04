@@ -73,7 +73,7 @@ def load_audio_features(wav_path: Path, num_frames: int,
 
 
 # ---------------------------------------------------------------------------
-def load_video_frames(path: Path, frame_size: int) -> np.ndarray | None:
+def load_video_frames(path: Path, frame_width: int, frame_height: int) -> np.ndarray | None:
     """Read video frames as model-sized uint8 greyscale."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -84,7 +84,7 @@ def load_video_frames(path: Path, frame_size: int) -> np.ndarray | None:
         if not ret:
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (frame_size, frame_size), interpolation=cv2.INTER_AREA)
+        gray = cv2.resize(gray, (frame_width, frame_height), interpolation=cv2.INTER_AREA)
         frames.append(gray)
     cap.release()
     return np.stack(frames, axis=0) if frames else None
@@ -198,7 +198,8 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
         "num_frames": end - start,
         "num_flows": f_end - f_start,
         "fps": cfg.fps,
-        "frame_size": cfg.frame_size,
+        "frame_width": cfg.frame_width,
+        "frame_height": cfg.frame_height,
         "flow_dtype": "uint8",
         "flow_min": FLOW_MIN,
         "flow_max": FLOW_MAX,
@@ -245,23 +246,25 @@ def main():
             continue
 
         # ---- video → optical flow ----
-        frames = load_video_frames(video, cfg.frame_size)
+        frames = load_video_frames(video, cfg.frame_width, cfg.frame_height)
         if frames is None or len(frames) < 2:
             tqdm.write(f"  [skip] {d.name}: cannot read video")
             continue
 
         nf = min(len(frames) - 1, n_frames - 1)
         if args.format == "shard":
-            flows = np.empty((nf, 2, cfg.frame_size, cfg.frame_size), dtype=np.uint8)
+            flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.uint8)
             for i in range(nf):
                 flow = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
-                                       cfg.frame_size, cfg.flow_norm).numpy()
+                                       cfg.frame_width, cfg.frame_height,
+                                       cfg.flow_norm).numpy()
                 flows[i] = quantize_flow(flow)
         else:
-            flows = np.empty((nf, 2, cfg.frame_size, cfg.frame_size), dtype=np.float32)
+            flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.float32)
             for i in range(nf):
                 flows[i] = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
-                                           cfg.frame_size, cfg.flow_norm).numpy()
+                                           cfg.frame_width, cfg.frame_height,
+                                           cfg.flow_norm).numpy()
 
         # ---- audio ----
         if audio.exists() and cfg.use_audio:

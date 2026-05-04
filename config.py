@@ -8,7 +8,8 @@ class Config:
     fps: int = 60
     native_width: int = 384
     native_height: int = 224
-    frame_size: int = 128
+    frame_width: int = 160
+    frame_height: int = 120
     flow_norm: float = 20.0
 
     # Native-resolution HUD ROIs: (x, y, width, height). These are defaults

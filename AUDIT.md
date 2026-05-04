@@ -16,6 +16,7 @@ This file tracks bloat, broken paths, and optimization issues found in the activ
 - Made `MatchContext` opt-in so the default model path can use vectorized LSTM execution.
 - Switched the preferred processed dataset format from compressed `.npz` to mmap-friendly shard directories with uint8-quantized flow and float16 audio features.
 - Changed replay video capture from 128px JPEG frames to native-resolution lossless H.264 cache video, avoiding macroblocking before optical-flow preprocessing without using FFV1.
+- Changed model flow input from square 128x128 to aspect-preserving 160x120; there is no meaningful power-of-two requirement for the CNN path.
 
 ## Critical Runtime Breakages
 

@@ -143,7 +143,8 @@ def main():
 
     sensory_buf = ReactionBuffer(
         sensory_lag=cfg.sensory_lag_frames,
-        frame_size=cfg.frame_size, flow_norm=cfg.flow_norm,
+        frame_width=cfg.frame_width, frame_height=cfg.frame_height,
+        flow_norm=cfg.flow_norm,
         device=str(device))
     motor_buf = OutputDelayBuffer(motor_lag=cfg.motor_lag_frames)
 

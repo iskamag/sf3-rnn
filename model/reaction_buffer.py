@@ -23,12 +23,14 @@ from vision.optical_flow import compute_flow, preprocess_flow
 class ReactionBuffer:
     def __init__(self,
                  sensory_lag: int = 8,       # frames of input latency
-                 frame_size: int = 128,
+                 frame_width: int = 160,
+                 frame_height: int = 120,
                  flow_norm: float = 20.0,
                  device: str = "cuda",
                  ):
         self.sensory_lag = sensory_lag
-        self.frame_size = frame_size
+        self.frame_width = frame_width
+        self.frame_height = frame_height
         self.flow_norm = flow_norm
         self.device = device
 
@@ -39,7 +41,7 @@ class ReactionBuffer:
     # ------------------------------------------------------------------
     def add_frame(self, frame_rgb: np.ndarray):                # (H, W, 3) uint8
         gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
-        gray = cv2.resize(gray, (self.frame_size, self.frame_size))
+        gray = cv2.resize(gray, (self.frame_width, self.frame_height))
         self._frames.append(gray)
 
     def ready(self) -> bool:
@@ -55,7 +57,7 @@ class ReactionBuffer:
         curr = self._frames[-self.sensory_lag - 1]
 
         raw = compute_flow(prev, curr)
-        tensor = preprocess_flow(raw, self.frame_size, self.flow_norm)
+        tensor = preprocess_flow(raw, self.frame_width, self.frame_height, self.flow_norm)
         return tensor.unsqueeze(0).unsqueeze(0).to(self.device)
 
     def get_flow_at(self, offset: int) -> Optional[torch.Tensor]:
@@ -66,5 +68,5 @@ class ReactionBuffer:
         prev = self._frames[-offset - 2]
         curr = self._frames[-offset - 1]
         raw = compute_flow(prev, curr)
-        tensor = preprocess_flow(raw, self.frame_size, self.flow_norm)
+        tensor = preprocess_flow(raw, self.frame_width, self.frame_height, self.flow_norm)
         return tensor.unsqueeze(0).unsqueeze(0).to(self.device)
