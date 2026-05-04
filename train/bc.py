@@ -93,6 +93,12 @@ class BCTrainer:
                 buttons = batch["buttons"].to(self.device, non_blocking=True)
 
                 kwargs = {}
+                ego = batch["ego_player"]
+                if isinstance(ego, torch.Tensor):
+                    ego = ego.to(self.device, dtype=torch.float32).unsqueeze(1)
+                else:
+                    ego = torch.tensor(ego, device=self.device,
+                                       dtype=torch.float32).view(-1, 1)
                 if cfg.use_audio:
                     kwargs["audio"] = batch["audio"].to(self.device, non_blocking=True)
 
@@ -104,7 +110,7 @@ class BCTrainer:
                         self.model.reset_hidden()
                     last_file = cur_file
 
-                out = self.model(flows, **kwargs)
+                out = self.model(flows, ego, **kwargs)
                 loss = bc_loss(out, {"movement": movement, "buttons": buttons})
 
                 self.optim.zero_grad(set_to_none=True)

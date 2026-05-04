@@ -1,8 +1,8 @@
--- input_log.lua — log P1 inputs + game state every frame
+-- input_log.lua — log P1/P2 inputs + game state every frame
 -- Drop in FBNeo directory, run with:  fcadefbneo.exe ... -lua input_log.lua
 --
 -- Output format (one line per frame):
---   <frame> <bits> <p1_hp> <p2_hp> <timer> <p1_wins> <p2_wins>
+--   <frame> <p1_bits> <p2_bits> <p1_hp> <p2_hp> <p1_stun> <p2_stun> <timer> <p1_wins> <p2_wins>
 
 local out = io.open("input_log.txt", "w")
 if not out then
@@ -16,42 +16,53 @@ local P2_HEALTH = 0x20691A3
 local ROUND_TIMER = 0x2011377     -- frames remaining (0-99)
 local P1_WINS    = 0x206A2DB     -- rounds won  (FIXME: untested, always reads 0)
 local P2_WINS    = 0x206A2DD     -- rounds won  (FIXME: untested, always reads 0)
+local P1_COMBO   = 0x20696C5     -- P1 combo counter (non-zero → P2 in stun)
+local P2_COMBO   = 0x206961D     -- P2 combo counter (non-zero → P1 in stun)
 
 local MAX_HEALTH = 0xA0  -- 160
 
 local frame = 0
 
-local function log_frame()
-    -- Inputs
+local function read_bits(prefix)
+    -- CPS3/SF3 uses per-game button names, not generic "P1 Button N" (cf. fbneo-training-mode)
     local j = joypad.get()
     local bits = 0
-    -- CPS3/SF3 uses per-game button names, not generic "P1 Button N" (cf. fbneo-training-mode)
-    if j["P1 Up"]          then bits = bits + 1    end  -- bit 0
-    if j["P1 Down"]        then bits = bits + 2    end  -- bit 1
-    if j["P1 Left"]        then bits = bits + 4    end  -- bit 2
-    if j["P1 Right"]       then bits = bits + 8    end  -- bit 3
-    if j["P1 Weak Punch"]  then bits = bits + 16   end  -- bit 4  (LP)
-    if j["P1 Medium Punch"] then bits = bits + 32  end  -- bit 5  (MP)
-    if j["P1 Strong Punch"] then bits = bits + 64  end  -- bit 6  (HP)
-    if j["P1 Weak Kick"]   then bits = bits + 128  end  -- bit 7  (LK)
-    if j["P1 Medium Kick"] then bits = bits + 256  end  -- bit 8  (MK)
-    if j["P1 Strong Kick"] then bits = bits + 512  end  -- bit 9  (HK)
-    if j["P1 Start"]       then bits = bits + 1024 end  -- bit 10
+    if j[prefix .. " Up"]          then bits = bits + 1    end  -- bit 0
+    if j[prefix .. " Down"]        then bits = bits + 2    end  -- bit 1
+    if j[prefix .. " Left"]        then bits = bits + 4    end  -- bit 2
+    if j[prefix .. " Right"]       then bits = bits + 8    end  -- bit 3
+    if j[prefix .. " Weak Punch"]  then bits = bits + 16   end  -- bit 4  (LP)
+    if j[prefix .. " Medium Punch"] then bits = bits + 32  end  -- bit 5  (MP)
+    if j[prefix .. " Strong Punch"] then bits = bits + 64  end  -- bit 6  (HP)
+    if j[prefix .. " Weak Kick"]   then bits = bits + 128  end  -- bit 7  (LK)
+    if j[prefix .. " Medium Kick"] then bits = bits + 256  end  -- bit 8  (MK)
+    if j[prefix .. " Strong Kick"] then bits = bits + 512  end  -- bit 9  (HK)
+    if j[prefix .. " Start"]       then bits = bits + 1024 end  -- bit 10
+    return bits
+end
+
+local function log_frame()
+    local p1_bits = read_bits("P1")
+    local p2_bits = read_bits("P2")
 
     -- Game state from memory
     local p1_hp  = memory.readbyte(P1_HEALTH) / MAX_HEALTH
     local p2_hp  = memory.readbyte(P2_HEALTH) / MAX_HEALTH
-    local timer  = memory.readbyte(ROUND_TIMER)
-    local p1_w   = memory.readbyte(P1_WINS)
-    local p2_w   = memory.readbyte(P2_WINS)
+    -- P1 in stun = P2's combo counter is non-zero (P2 is hitting P1)
+    local p1_stun = memory.readbyte(P2_COMBO) ~= 0 and 1 or 0
+    -- P2 in stun = P1's combo counter is non-zero (P1 is hitting P2)
+    local p2_stun = memory.readbyte(P1_COMBO) ~= 0 and 1 or 0
+    local timer   = memory.readbyte(ROUND_TIMER)
+    local p1_w    = memory.readbyte(P1_WINS)
+    local p2_w    = memory.readbyte(P2_WINS)
 
-    out:write(string.format("%d %d %.3f %.3f %d %d %d\n",
-        frame, bits, p1_hp, p2_hp, timer, p1_w, p2_w))
+    out:write(string.format("%d %d %d %.3f %.3f %d %d %d %d %d\n",
+        frame, p1_bits, p2_bits, p1_hp, p2_hp, p1_stun, p2_stun, timer, p1_w, p2_w))
     out:flush()
     frame = frame + 1
 end
 
-print("input_log.lua: logging (frame inputs p1hp p2hp timer p1wins p2wins)")
+print("input_log.lua: logging (frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins)")
 while true do
     log_frame()
     emu.frameadvance()

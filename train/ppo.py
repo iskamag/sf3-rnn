@@ -117,7 +117,9 @@ class PPOTrainer:
         kw = {}
         if cfg.use_audio:
             kw["audio"] = batch["audio"].unsqueeze(0)
-        out = self.model(batch["flows"].unsqueeze(0), context=None, **kw)
+        out = self.model(batch["flows"].unsqueeze(0),
+                          torch.zeros(1, 1, device=self.device),
+                          context=None, **kw)
         new_mov = out["movement"].squeeze(0)          # (T, 9)
         new_btn = out["buttons"].squeeze(0)           # (T, 6)
         new_val = out["value"].squeeze(0)             # (T,)

@@ -18,8 +18,9 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │      ↓                                       ↓              │
 │  FlowCNN → 256-d                       AudioMLP → 64-d      │
 │      ↓                                       ↓              │
-│      └───── concat ──── 320-d ──────────┘                  │
+│      └───── concat ──── 385-d ──────────┘                  │
 │      └───── + MatchContext (64-d GRU) ───┘                  │
+│      └───── + ego_player (1-d flag)  ───┘                  │
 │                        ↓                                    │
 │  2-layer LSTM (hidden=512)  ←  hidden state persistent      │
 │                        ↓                                    │
@@ -56,10 +57,12 @@ the full match from optical flow alone.
 
 - **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d
 - **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → MLP → 64-d
-- **LSTM**: 2 layers, hidden=512, dropout=0.1, input = 256 + 64 + 64 = 384-d
+- **LSTM**: 2 layers, hidden=512, dropout=0.1, input = 256 + 64 + 64 + 1 = 385-d
 - **MatchContext**: GRUCell(LSTM_out → 64-d), persisted across BC segments
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 - **Value head**: scalar, for PPO
+- **ego_player**: single scalar (0=P1, 1=P2) concatenated into LSTM input so the
+  model can play either side; dataset randomly picks a player per sample
 
 ## Project layout
 
@@ -78,7 +81,7 @@ st-rnn/
 │   ├── audio_features.py      # MFCC + RMS + spectral centroid (256-pt FFT)
 │   └── game_state.py          # Match splitting from health signal
 ├── emulator/
-│   ├── input_log.lua          # FBNeo Lua script — logs inputs + health
+│   ├── input_log.lua          # FBNeo Lua script — logs P1/P2 inputs, health, stun
 │   ├── capture_replay.sh      # Launch + capture video/audio/inputs
 │   └── start_screencast.py    # XDG Desktop Portal screencast helper
 ├── data/
@@ -135,14 +138,14 @@ What happens:
 2. A screencast dialog appears — **accept it**
 3. `pw-v4l2 ffmpeg` captures the gamescope window as 128×128 grayscale
    H.264 video + 8-bit 16 kHz mono WAV audio
-4. The Lua script writes per-frame CPS3 bitfields + health/timer/wins
-   to `input_log.txt`
+4. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
+   timer, and wins to `input_log.txt`
 
 Output in `data/captures/1777806845400-9194/`:
 ```
 video.mkv       — 128×128 grayscale, 60 fps, H.264 VAAPI
 audio.wav       — 8-bit mono 16 kHz PCM
-input_log.txt   — "frame bits p1hp p2hp timer p1wins p2wins" per line
+input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 ```
 
 Repeat for many replays — different players, characters, skill levels.
@@ -164,14 +167,18 @@ Output: `data/processed/<id>_match00.npz`, `..._match01.npz`, etc.
 
 Contents of each `.npz`:
 
-| Array        | Shape            | Description                       |
-|-------------|------------------|-----------------------------------|
-| `flows`     | (T, 2, 128, 128) | Farneback optical flow, normalised |
-| `movement`  | (T,)             | Direction index 0–8               |
-| `buttons`   | (T, 6)           | Button states {0, 1}              |
-| `health_p1` | (T,)             | P1 health 0–1 (from Lua memory)   |
-| `health_p2` | (T,)             | P2 health 0–1                     |
-| `audio`     | (T, 15)          | MFCC + energy features            |
+| Array          | Shape              | Description                          |
+|----------------|--------------------|--------------------------------------|
+| `flows`        | (T, 2, 128, 128)   | Farneback optical flow, normalised  |
+| `movement`     | (T,)               | P1 direction index 0–8              |
+| `buttons`      | (T, 6)             | P1 button states {0, 1}             |
+| `p2_movement`  | (T,)               | P2 direction index (raw, no mirror) |
+| `p2_buttons`   | (T, 6)             | P2 button states                    |
+| `health_p1`    | (T,)               | P1 health 0–1 (from Lua memory)     |
+| `health_p2`    | (T,)               | P2 health 0–1                       |
+| `stun_p1`      | (T,)               | P1 hitstun {0, 1}                   |
+| `stun_p2`      | (T,)               | P2 hitstun {0, 1}                   |
+| `audio`        | (T, 15)            | MFCC + energy features              |
 
 ### 4. Behaviour cloning
 
@@ -265,7 +272,7 @@ All tunables in `config.py`:
 
 ## CPS3 input bitfield
 
-The Lua script logs inputs in CPS3 format:
+The Lua script logs P1 and P2 inputs in CPS3 format (same encoding for both):
 
 ```
 bit 0 — Up          bit 4 — LP (jab)
@@ -276,6 +283,9 @@ bit 3 — Right       bit 7 — LK (short)
                     bit 9 — HK (roundhouse)
 bit 10 — Start
 ```
+
+Hitstun is tracked via CPS3 combo-counter memory addresses: P1 is in stun
+when P2's combo counter is non-zero (P2 is hitting P1), and vice versa.
 
 ## Notes
 

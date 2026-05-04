@@ -93,12 +93,13 @@ class SF3RNN(nn.Module):
 
         self.encoder = _FlowEncoder(feature_dim)
 
+        # +1 for the ego_player indicator bit (0=P1, 1=P2)
+        lstm_input = feature_dim + context_dim + 1
         if use_audio:
             self.audio_encoder = _AudioEncoder(audio_feat_dim, audio_dim)
-            lstm_input = feature_dim + audio_dim + context_dim
+            lstm_input += audio_dim
         else:
             self.audio_encoder = None
-            lstm_input = feature_dim + context_dim
 
         self.match_context = MatchContext(lstm_hidden, context_dim)
 
@@ -135,6 +136,7 @@ class SF3RNN(nn.Module):
     # ------------------------------------------------------------------
     def forward(self,
                 flows: torch.Tensor,                          # (B, T, 2, H, W)
+                ego_player: torch.Tensor,                      # (B, 1) float 0=P1, 1=P2
                 hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
                 audio: Optional[torch.Tensor] = None,          # (B, T, 15) or None
                 context: Optional[torch.Tensor] = None,         # (B, C) initial context
@@ -158,11 +160,11 @@ class SF3RNN(nn.Module):
         # Iterate over timesteps so the match context can be injected
         lstm_outs = []
         for t in range(T):
+            parts = [vis[:, t], ctx, ego_player]
             if self.use_audio:
-                step = torch.cat([vis[:, t], aud[:, t], ctx], dim=-1)
-            else:
-                step = torch.cat([vis[:, t], ctx], dim=-1)
-            step = step.unsqueeze(1)                          # (B, 1, F+A+C)
+                parts.insert(1, aud[:, t])
+            step = torch.cat(parts, dim=-1)
+            step = step.unsqueeze(1)                          # (B, 1, F+A+C+1)
 
             out, hidden = self.lstm(step, hidden)             # (B, 1, H)
             ctx = self.match_context(out.squeeze(1), ctx)     # update profile
@@ -184,14 +186,16 @@ class SF3RNN(nn.Module):
              flow: torch.Tensor,                              # (1, 1, 2, H, W)
              hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
              audio_feats: Optional[torch.Tensor] = None,       # (1, 15)
+             ego_player: float = 0.0,                           # 0=P1, 1=P2
              ) -> Tuple[Dict[str, torch.Tensor],
                         Tuple[torch.Tensor, torch.Tensor]]:
         """Single-timestep inference.  *flow* and *audio_feats* are the
         (separately delayed) sensory inputs.  The match context persists
         across calls via self._context."""
         audio = audio_feats.unsqueeze(1) if audio_feats is not None else None
+        ego = torch.tensor([[ego_player]], device=flow.device, dtype=torch.float32)
         out = self.forward(flow, hidden=hidden, audio=audio,
-                           context=self._context)
+                           context=self._context, ego_player=ego)
         self._context = out["context"]
         actions = {k: out[k][:, -1] for k in ("movement", "buttons", "value")}
         return actions, (out["hidden"][0], out["hidden"][1])

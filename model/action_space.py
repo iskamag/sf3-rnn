@@ -73,6 +73,36 @@ def action_to_str(direction: Direction,
     return f"{d}{ '+' + b if b else ''}"
 
 # ---------------------------------------------------------------------------
+# Mirroring — for training from P2's perspective
+# ---------------------------------------------------------------------------
+
+_MIRROR_DIR = {
+    Direction.NEUTRAL: Direction.NEUTRAL,
+    Direction.UP: Direction.UP,
+    Direction.UP_FORWARD: Direction.UP_BACK,
+    Direction.FORWARD: Direction.BACK,
+    Direction.DOWN_FORWARD: Direction.DOWN_BACK,
+    Direction.DOWN: Direction.DOWN,
+    Direction.DOWN_BACK: Direction.DOWN_FORWARD,
+    Direction.BACK: Direction.FORWARD,
+    Direction.UP_BACK: Direction.UP_FORWARD,
+}
+
+
+def mirror_direction(d: Direction) -> Direction:
+    """Flip left/right in a Direction enum (e.g. FORWARD → BACK)."""
+    return _MIRROR_DIR[d]
+
+
+def mirror_bitfield(bits: int) -> int:
+    """Flip Left (bit 2) ↔ Right (bit 3) in a CPS3 input bitfield."""
+    left = (bits >> 2) & 1
+    right = (bits >> 3) & 1
+    bits &= ~(1 << 2 | 1 << 3)          # clear both
+    bits |= (left << 3) | (right << 2)  # swap
+    return bits
+
+# ---------------------------------------------------------------------------
 # FBNeo bitfield decoding (CPS3: sfiii3 / sfiii3n)
 # ---------------------------------------------------------------------------
 # CPS3 input byte layout used by FBNeo / Fightcade replays:
