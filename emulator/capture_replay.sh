@@ -54,7 +54,7 @@ gamescope \
     -W 640 -H 480 -r 60 \
     -- wine "$EMU_DIR/fcadefbneo.exe" \
     "quark:stream,$GAME,$CHALLENGE_ID.2,7100" \
-    -q -lua input_log.lua &
+    -lua input_log.lua &
 EMU_PID=$!
 sleep 5
 
