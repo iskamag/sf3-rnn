@@ -55,6 +55,7 @@ class Config:
     mingru_dropout: float = 0.1
     num_directions: int = 9      # neutral + 8-way
     num_buttons: int = 6         # LP, MP, HP, LK, MK, HK
+    cnn_channels: int = 16       # base channels for FlowCNN (16=fast/CPU, 32=balanced, 24=default)
 
     # --- Training ---
     batch_size: int = 16
@@ -68,7 +69,7 @@ class Config:
     bc_epochs: int = 100
     use_amp: bool = True
     amp_dtype: str = "float16"
-    compile_model: bool = True
+    compile_model: bool = False
 
     # --- Match-context profiling ---
     # A 64-d GRU that the minGRU reads every frame and updates at chunk

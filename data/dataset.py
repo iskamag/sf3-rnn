@@ -129,11 +129,11 @@ class ReplayDataset(Dataset):
 
         t0 = start + delay
         if ego == 0:
-            mv = data["movement"][t0 : t0 + L].copy()
-            bt = data["buttons"][t0 : t0 + L].copy()
+            mv = data["movement"][t0 : t0 + L]
+            bt = data["buttons"][t0 : t0 + L]
         else:
-            mv = data["p2_movement"][t0 : t0 + L].copy()
-            bt = data["p2_buttons"][t0 : t0 + L].copy()
+            mv = data["p2_movement"][t0 : t0 + L]
+            bt = data["p2_buttons"][t0 : t0 + L]
 
         hp1 = data.get("health_p1", None)
         hp2 = data.get("health_p2", None)
@@ -141,17 +141,16 @@ class ReplayDataset(Dataset):
         st2 = data.get("stun_p2", None)
         if hp1 is not None:
             if ego == 0:
-                hp1 = hp1[t0 : t0 + L].copy()
-                hp2 = hp2[t0 : t0 + L].copy()
-                st1 = st1[t0 : t0 + L].copy() if st1 is not None else np.zeros(L, dtype=np.float32)
-                st2 = st2[t0 : t0 + L].copy() if st2 is not None else np.zeros(L, dtype=np.float32)
+                hp1 = hp1[t0 : t0 + L]
+                hp2 = hp2[t0 : t0 + L]
+                st1 = st1[t0 : t0 + L] if st1 is not None else np.zeros(L, dtype=np.float32)
+                st2 = st2[t0 : t0 + L] if st2 is not None else np.zeros(L, dtype=np.float32)
             else:
-                # Swap: our health = P2's, opponent = P1's
-                hp1, hp2 = hp2[t0 : t0 + L].copy(), hp1[t0 : t0 + L].copy()
-                st1, st2 = (st2[t0 : t0 + L].copy() if st2 is not None else np.zeros(L, dtype=np.float32),
-                            st1[t0 : t0 + L].copy() if st1 is not None else np.zeros(L, dtype=np.float32))
-            hp1 = hp1.astype(np.float32) / 255.0
-            hp2 = hp2.astype(np.float32) / 255.0
+                hp1, hp2 = hp2[t0 : t0 + L], hp1[t0 : t0 + L]
+                st1, st2 = (st2[t0 : t0 + L] if st2 is not None else np.zeros(L, dtype=np.float32),
+                            st1[t0 : t0 + L] if st1 is not None else np.zeros(L, dtype=np.float32))
+            hp1 = hp1.astype(np.float32).copy() / 255.0
+            hp2 = hp2.astype(np.float32).copy() / 255.0
         else:
             hp1 = hp2 = np.zeros(L, dtype=np.float32)
             st1 = st2 = np.zeros(L, dtype=np.float32)
@@ -162,18 +161,18 @@ class ReplayDataset(Dataset):
                 raise ValueError(
                     f"use_audio=True but {self.files[fi].name} has no 'audio' array")
             audio_start = start + self.audio_offset
-            af = af[audio_start : audio_start + L].astype(np.float32, copy=True)
+            af = af[audio_start : audio_start + L].astype(np.float32)
         else:
             af = np.zeros((L, 0), dtype=np.float32)
 
         return {
-            "flows":      torch.from_numpy(fs.astype(np.float32, copy=False)),
-            "movement":   torch.from_numpy(mv.astype(np.int64, copy=False)),
-            "buttons":    torch.from_numpy(bt.astype(np.float32, copy=False)),
-            "hp1":        torch.from_numpy(hp1.astype(np.float32, copy=False)),
-            "hp2":        torch.from_numpy(hp2.astype(np.float32, copy=False)),
-            "stun1":      torch.from_numpy(st1.astype(np.float32, copy=False)),
-            "stun2":      torch.from_numpy(st2.astype(np.float32, copy=False)),
+            "flows":      torch.from_numpy(fs),
+            "movement":   torch.from_numpy(np.asarray(mv, dtype=np.int64)),
+            "buttons":    torch.from_numpy(np.asarray(bt, dtype=np.float32)),
+            "hp1":        torch.from_numpy(np.asarray(hp1, dtype=np.float32)),
+            "hp2":        torch.from_numpy(np.asarray(hp2, dtype=np.float32)),
+            "stun1":      torch.from_numpy(np.asarray(st1, dtype=np.float32)),
+            "stun2":      torch.from_numpy(np.asarray(st2, dtype=np.float32)),
             "ego_player": ego,
-            "audio":      torch.from_numpy(af.astype(np.float32, copy=False)),
+            "audio":      torch.from_numpy(af),
         }

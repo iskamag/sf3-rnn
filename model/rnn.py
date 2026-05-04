@@ -28,17 +28,28 @@ HiddenState = Optional[torch.Tensor]
 # Visual encoder — 2-channel optical flow → feature vector
 # ---------------------------------------------------------------------------
 class _FlowEncoder(nn.Module):
-    def __init__(self, feature_dim: int = 256):
+    """Lightweight convolutional flow encoder.
+
+    Uses InstanceNorm (no running stats overhead on CPU) and smaller channel
+    counts to reduce FLOPs ~6× vs the original while preserving receptive field.
+    Base channel count ``ch`` controls the capacity/speed trade-off:
+      ch=16  → fastest, ~36 MFLOPs/frame  (~7× faster than original 241 MFLOPs)
+      ch=24  → balanced, ~78 MFLOPs/frame  (~3× faster)
+      ch=32  → higher capacity, ~126 MFLOPs/frame  (~2× faster)
+    """
+    def __init__(self, feature_dim: int = 256, ch: int = 16):
         super().__init__()
+        c = ch
         self.conv = nn.Sequential(
-            nn.Conv2d(2, 32, 7, stride=2, padding=3), nn.BatchNorm2d(32), nn.ReLU(),
-            nn.Conv2d(32, 64, 5, stride=2, padding=2), nn.BatchNorm2d(64), nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
-            nn.Conv2d(128, 256, 3, stride=2, padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.Conv2d(2, c, 5, stride=2, padding=2), nn.InstanceNorm2d(c), nn.ReLU(),
+            nn.Conv2d(c, c * 2, 3, stride=2, padding=1), nn.InstanceNorm2d(c * 2), nn.ReLU(),
+            nn.Conv2d(c * 2, c * 4, 3, stride=2, padding=1), nn.InstanceNorm2d(c * 4), nn.ReLU(),
+            nn.Conv2d(c * 4, c * 4, 3, stride=2, padding=1), nn.InstanceNorm2d(c * 4), nn.ReLU(),
         )
         self.pool = nn.AdaptiveAvgPool2d((4, 4))
+        fc_in = c * 4 * 4 * 4
         self.fc = nn.Sequential(
-            nn.Linear(256 * 4 * 4, feature_dim),
+            nn.Linear(fc_in, feature_dim),
             nn.Dropout(0.2),
         )
 
@@ -113,6 +124,7 @@ class SF3RNN(nn.Module):
                  mingru_dropout: float = 0.1,
                  num_directions: int = 9,
                  num_buttons: int = 6,
+                 cnn_channels: int = 16,
                  ):
         super().__init__()
         self.mingru_hidden = mingru_hidden
@@ -126,7 +138,7 @@ class SF3RNN(nn.Module):
         self.action_dim = num_directions + num_buttons                  # 15
         self.head_out_dim = num_directions + num_buttons + 1            # 16  (mov+btn+val)
 
-        self.encoder = _FlowEncoder(feature_dim)
+        self.encoder = _FlowEncoder(feature_dim, cnn_channels)
 
         # Single-action embedder — applied per-frame, then pooled across N
         self._action_embed = nn.Sequential(

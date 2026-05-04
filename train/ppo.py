@@ -94,6 +94,7 @@ class PPOTrainer:
             mingru_dropout=cfg.mingru_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
+            cnn_channels=cfg.cnn_channels,
         ).to(self.device)
 
         if bc_checkpoint is not None:

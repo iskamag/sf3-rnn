@@ -54,8 +54,11 @@ class BCTrainer:
         self.recur_steps = cfg.seq_len // self.N
 
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+        self._is_cpu = self.device.type == "cpu"
         if self.device.type == "cuda":
             torch.set_float32_matmul_precision("high")
+        if self._is_cpu:
+            torch.set_num_threads(torch.get_num_threads())
 
         self.model = SF3RNN(
             feature_dim=cfg.feature_dim,
@@ -69,6 +72,7 @@ class BCTrainer:
             mingru_dropout=cfg.mingru_dropout,
             num_directions=cfg.num_directions,
             num_buttons=cfg.num_buttons,
+            cnn_channels=cfg.cnn_channels,
         ).to(self.device)
 
         self.optim = make_muon_optimizer(
@@ -90,14 +94,14 @@ class BCTrainer:
         if resume is not None:
             self._load(resume)
 
-        if cfg.compile_model and self.device.type == "cuda":
-            self.model = torch.compile(self.model)
-
         self.dataset = ReplayDataset(
             cfg.processed_dir, cfg.seq_len, cfg.total_delay_frames,
             audio_offset=cfg.total_delay_frames - (cfg.audio_lag_frames + cfg.motor_lag_frames),
             use_audio=cfg.use_audio, segment_stride=cfg.segment_stride,
             cache_size=max(2, cfg.batch_size))
+
+        if cfg.compile_model:
+            self.model = torch.compile(self.model)
 
     # ------------------------------------------------------------------
     def run(self):
@@ -213,11 +217,16 @@ class BCTrainer:
             loss = bc_loss(out, {"movement": movement, "buttons": buttons})
 
         self.optim.zero_grad(set_to_none=True)
-        self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optim)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.scaler.step(self.optim)
-        self.scaler.update()
+        if self.use_amp:
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optim)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.scaler.step(self.optim)
+            self.scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optim.step()
         return loss.detach(), out["hidden"].detach(), out["context"].detach()
 
     # ------------------------------------------------------------------
