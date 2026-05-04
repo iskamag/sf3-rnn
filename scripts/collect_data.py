@@ -203,7 +203,7 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser(description="Convert captures to training shards")
-    p.add_argument("--capture-dir", type=Path, required=True)
+    p.add_argument("--capture-dir", type=Path, default=Path("data/captures"))
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     p.add_argument("--format", choices=("shard", "npz"), default="shard")
     args = p.parse_args()
