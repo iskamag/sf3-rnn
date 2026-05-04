@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from config import Config
 from model.rnn import SF3RNN
+from train.muon import make_muon_optimizer
 from train.reward import compute_returns
 
 
@@ -98,8 +99,14 @@ class PPOTrainer:
             self.model.load_state_dict(ckpt["model"], strict=False)
             print(f"[PPO] Loaded BC weights from {bc_checkpoint}")
 
-        self.optim = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr * 0.1)
+        self.optim = make_muon_optimizer(
+            self.model,
+            lr=cfg.muon_lr * 0.1,
+            adamw_lr=cfg.lr * 0.1,
+            weight_decay=cfg.weight_decay,
+            momentum=cfg.muon_momentum,
+            ns_steps=cfg.muon_ns_steps,
+        )
 
         self.buffer = RolloutBuffer(cfg)
         self.writer = SummaryWriter(cfg.log_dir / "ppo")
@@ -241,5 +248,6 @@ class PPOTrainer:
         torch.save({
             "step": self.step,
             "model": self.model.state_dict(),
+            "optim_name": "muon",
             "optim": self.optim.state_dict(),
         }, p)

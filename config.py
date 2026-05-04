@@ -55,13 +55,16 @@ class Config:
     num_buttons: int = 6         # LP, MP, HP, LK, MK, HK
 
     # --- Training ---
-    batch_size: int = 32
+    batch_size: int = 4
     seq_len: int = 128           # frames per training segment  (~2 s)
     segment_stride: int = 4      # reduce highly-overlapping BC windows
     lr: float = 1e-4
+    muon_lr: float = 2e-3
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
     weight_decay: float = 1e-5
     bc_epochs: int = 100
-    num_workers: int = 4
+    num_workers: int = 0
 
     # --- Match-context profiling ---
     # A 64-d GRU that the minGRU reads & writes every frame.  Persists

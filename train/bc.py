@@ -20,6 +20,7 @@ from tqdm import tqdm
 from config import Config
 from data.dataset import ReplayDataset
 from model.rnn import SF3RNN
+from train.muon import make_muon_optimizer
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +61,14 @@ class BCTrainer:
             use_match_context=cfg.use_match_context,
         ).to(self.device)
 
-        self.optim = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.optim = make_muon_optimizer(
+            self.model,
+            lr=cfg.muon_lr,
+            adamw_lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+            momentum=cfg.muon_momentum,
+            ns_steps=cfg.muon_ns_steps,
+        )
 
         self.writer = SummaryWriter(cfg.log_dir / "bc")
         self.epoch = 0
@@ -144,11 +151,15 @@ class BCTrainer:
         torch.save({
             "epoch": self.epoch,
             "model": self.model.state_dict(),
+            "optim_name": "muon",
             "optim": self.optim.state_dict(),
         }, p)
 
     def _load(self, path: Path):
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model"])
-        self.optim.load_state_dict(ckpt["optim"])
+        if ckpt.get("optim_name") == "muon":
+            self.optim.load_state_dict(ckpt["optim"])
+        else:
+            print("[BC] Checkpoint optimizer is not Muon; resetting optimizer state")
         self.epoch = ckpt["epoch"] + 1
