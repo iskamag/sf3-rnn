@@ -65,6 +65,7 @@ class BCTrainer:
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             context_dim=cfg.context_dim,
+            context_layers=cfg.context_layers,
             action_embed_dim=cfg.action_embed_dim,
             temporal_stride=cfg.temporal_stride,
             mingru_hidden=cfg.mingru_hidden,
@@ -144,14 +145,14 @@ class BCTrainer:
 
                     context = None
                     if any(contexts[i] is not None for i in active):
-                        context = torch.cat([contexts[i] for i in active], dim=0)
+                        context = torch.cat([contexts[i] for i in active], dim=1)
 
                     loss, next_hidden, next_context = self._train_batch(
                         batch, hidden, context)
 
                     for col, i in enumerate(active):
                         hiddens[i] = next_hidden[:, col:col + 1].detach()
-                        contexts[i] = next_context[col:col + 1].detach()
+                        contexts[i] = next_context[:, col:col + 1].detach()
 
                     batch_chunks = len(active)
                     total_loss += loss.item() * batch_chunks

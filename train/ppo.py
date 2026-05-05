@@ -87,6 +87,7 @@ class PPOTrainer:
             use_audio=cfg.use_audio,
             audio_dim=cfg.audio_dim,
             context_dim=cfg.context_dim,
+            context_layers=cfg.context_layers,
             action_embed_dim=cfg.action_embed_dim,
             temporal_stride=cfg.temporal_stride,
             mingru_hidden=cfg.mingru_hidden,

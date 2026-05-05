@@ -78,10 +78,12 @@ class Config:
     compile_model: bool = True
 
     # --- Match-context profiling ---
-    # A 64-d GRU that the minGRU reads every frame and updates at chunk
-    # boundaries. Persists across ordered BC chunks and full PPO episodes,
-    # accumulating an opponent profile: tendencies, habits, adaptation.
-    context_dim: int = 64
+    # A multi-layer GRU that the minGRU reads every timestep and updates at
+    # chunk boundaries.  Persists across ordered BC chunks and full PPO
+    # episodes, accumulating an opponent profile: tendencies, habits,
+    # adaptation.
+    context_dim: int = 128
+    context_layers: int = 2
 
     # --- PPO fine-tuning ---
     ppo_clip_eps: float = 0.2

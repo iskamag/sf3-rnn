@@ -19,9 +19,9 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │  FlowCNN → N×256-d                     pool → AudioMLP 64-d │
 │      ↓                                       ↓              │
 │      └─── pool ──── 256-d ────────────────┘                │
-│      └───── + MatchContext (64-d GRU) ───┘                  │
+│      └───── + MatchContext (2×128-d GRU) ──┘               │
 │      └───── + ego_player (1-d flag)  ───┘                  │
-│      └───── + prev_actions (pooled N) ──┘                  │
+│      └───── + prev_actions (temporal conv) ─┘              │
 │                        ↓                                    │
 │  2-layer minGRU (hidden=512) ← 1 step per N frames          │
 │                        ↓                                    │
@@ -70,15 +70,15 @@ the full match from optical flow alone.
 ### Model detail
 
 - **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d; processes pooled flow, not per-frame
-- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → pool over N frames → MLP → 64-d
+- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → per-frame MLP → max-pool over N frames (captures onset events vs mean-pool dilution)
 - **minGRU**: 2 layers, hidden=512, dropout=0.1, runs once per N=4 frames
-- **minGRU input**: 256 (pooled flow) + 64 (audio) + 64 (context) + 1 (ego) + 64 (prev-actions) = 449-d (with audio)
+- **minGRU input**: 256 (pooled flow) + 64 (audio) + 128 (context) + 1 (ego) + 64 (prev-actions) = 513-d (with audio)
 - **Action decoder**: learned sub-frame position embedding `(N, 512)` broadcast onto hidden → shared MLP → N independent (movement, buttons, value) sets per step
-- **MatchContext**: GRUCell(minGRU_out → 64-d), persisted across BC segments
+- **MatchContext**: stacked GRUCell (2 layers, 128-d), persisted across BC segments — multi-layer for richer opponent profiling
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 - **Value head**: merged into the per-slot action decoder; scalar per frame
 - **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input
-- **Prev-actions**: N distributions from the previous step pooled into a 64-d embedding
+- **Prev-actions**: per-frame MLP + causal depthwise 1D conv over N frames → preserves intra-stride button-press ordering (LP→MP→HP vs MP→LP→HP distinguishable, unlike mean-pool)
 - **Per-frame variation**: comes from a learned sub-frame position embedding, not per-frame CNN features — cuts CNN FLOPs by N×
 
 ## Project layout
