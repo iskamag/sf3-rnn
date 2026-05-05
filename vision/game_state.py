@@ -266,23 +266,36 @@ def audio_match_signal(audio_path: "Path",
     if p1w is None or p2w is None:
         return []
 
-    # Each template hit starts a new match.  For all but the last match the
-    # end is the next template hit.  For the last match we look for a win-
-    # counter transition (round win or reset) to mark the end; if none is
-    # found the match runs to end-of-data.
+    # Collect every win-counter change as a potential match-end.
+    transitions: list[int] = []
+    if p1w is not None and p2w is not None:
+        for j in range(1, len(p1w)):
+            if int(p1w[j]) != int(p1w[j - 1]) or int(p2w[j]) != int(p2w[j - 1]):
+                transitions.append(j)
+
+    # Each template hit starts a new match.  The match ends at either the
+    # next template hit or the first win-counter change that falls inside
+    # the match — whichever comes first.
     boundaries: list[tuple[int, int]] = []
+    ti = 0  # index into transitions
     for i, s_frame in enumerate(starts):
         s_frame = int(s_frame)
         if i + 1 < len(starts):
-            e_frame = int(starts[i + 1])
+            next_start = int(starts[i + 1])
         else:
-            # Last match — use the last win-counter change as the end.
-            # Falls back to end-of-data if no transitions are found.
-            e_frame = len(p1w)
-            if p1w is not None and p2w is not None:
-                for j in range(s_frame + 1, len(p1w)):
-                    if int(p1w[j]) != int(p1w[j - 1]) or int(p2w[j]) != int(p2w[j - 1]):
-                        e_frame = j
+            next_start = len(p1w)  # end of data
+
+        # Advance transition pointer past this start.
+        while ti < len(transitions) and transitions[ti] <= s_frame:
+            ti += 1
+
+        # Pick the earlier of next template start and first win transition.
+        if ti < len(transitions) and transitions[ti] < next_start:
+            e_frame = transitions[ti]
+            ti += 1
+        else:
+            e_frame = next_start
+
         if e_frame - s_frame >= min_match_len:
             boundaries.append((s_frame, e_frame))
 
