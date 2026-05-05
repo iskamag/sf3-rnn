@@ -11,8 +11,8 @@ usage: scripts/train.sh <command> [args]
 commands:
   bc [args...]          Run behavior cloning
   bc-resume [args...]   Resume behavior cloning from latest BC checkpoint
-  collect [args...]     Convert replay captures to training shards
-  view <capture-dir>    Visualise a capture with match-boundary overlay
+  collect [args...]     Convert captures; use --match-template <wav>
+  view <capture-dir>    View capture; use --match-template <wav>
   ppo [ckpt] [args...]  Run PPO, defaulting to latest BC checkpoint
   tensorboard           Start TensorBoard for logs/
 EOF
