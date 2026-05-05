@@ -116,7 +116,7 @@ def draw_overlay(frame: np.ndarray, idx: int, match_idx: int,
 def main():
     p = argparse.ArgumentParser(description="View captured replay with match boundaries")
     p.add_argument("capture_dir", type=Path)
-    p.add_argument("--match-template", type=Path, default=Path("hmm_16k_1s.wav"),
+    p.add_argument("--match-template", type=Path, default=Path("hmm_16k_08s.wav"),
                    help="Audio cue template used to detect match starts")
     p.add_argument("--corr-threshold", type=float, default=0.6,
                    help="Normalised cross-correlation threshold for template matching")

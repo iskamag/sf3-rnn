@@ -238,7 +238,7 @@ def main():
     p = argparse.ArgumentParser(description="Convert captures to training shards")
     p.add_argument("--capture-dir", type=Path, default=Path("data/captures"))
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
-    p.add_argument("--match-template", type=Path, default=Path("hmm_16k_1s.wav"),
+    p.add_argument("--match-template", type=Path, default=Path("hmm_16k_08s.wav"),
                    help="Audio cue template used to detect match starts")
     p.add_argument("--corr-threshold", type=float, default=0.6,
                    help="Normalised cross-correlation threshold for template matching")
