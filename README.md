@@ -14,7 +14,7 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │      ↓                                       ↓              │
 │  ReactionBuffer — visual lag 8 f       AudioBuffer — 3 f    │
 │      ↓                                       ↓              │
-│  Farneback OF  (N×2-ch, 160×120)     MFCC+energy  (N×15-d) │
+│  Farneback OF (N×2-ch, H×W)      MFCC+energy  (N×15-d) │
 │      ↓                                       ↓              │
 │  FlowCNN → N×256-d                     pool → AudioMLP 64-d │
 │      ↓                                       ↓              │
@@ -26,10 +26,10 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 │  2-layer minGRU (hidden=512) ← 1 step per N frames          │
 │                        ↓                                    │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  [hidden | flow_feat₀] → movement₀ buttons₀ value₀  │    │
-│  │  [hidden | flow_feat₁] → movement₁ buttons₁ value₁  │    │
-│  │  ...                              ...                │    │
-│  │  [hidden | flow_featₙ] → movementₙ buttonsₙ valueₙ  │    │
+│  │  hidden + pos-embed₀ → movement₀ buttons₀ value₀    │    │
+│  │  hidden + pos-embed₁ → movement₁ buttons₁ value₁    │    │
+│  │  ...                        ...                      │    │
+│  │  hidden + pos-embedₙ → movementₙ buttonsₙ valueₙ    │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                        ↓                                    │
 │  OutputDelayBuffer — motor lag 4 f                          │
@@ -69,16 +69,17 @@ the full match from optical flow alone.
 
 ### Model detail
 
-- **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d
+- **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d; processes pooled flow, not per-frame
 - **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → pool over N frames → MLP → 64-d
 - **minGRU**: 2 layers, hidden=512, dropout=0.1, runs once per N=4 frames
 - **minGRU input**: 256 (pooled flow) + 64 (audio) + 64 (context) + 1 (ego) + 64 (prev-actions) = 449-d (with audio)
-- **Action decoder**: shared MLP taking `[hidden | flow_featᵢ]` per frame slot → produces N independent (movement, buttons, value) sets
+- **Action decoder**: learned sub-frame position embedding `(N, 512)` broadcast onto hidden → shared MLP → N independent (movement, buttons, value) sets per step
 - **MatchContext**: GRUCell(minGRU_out → 64-d), persisted across BC segments
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 - **Value head**: merged into the per-slot action decoder; scalar per frame
 - **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input
 - **Prev-actions**: N distributions from the previous step pooled into a 64-d embedding
+- **Per-frame variation**: comes from a learned sub-frame position embedding, not per-frame CNN features — cuts CNN FLOPs by N×
 
 ## Project layout
 
@@ -125,8 +126,8 @@ The setup script creates `.venv/` and installs CPU-only PyTorch by default, so
 latest `minGRU-pytorch` does not pull CUDA wheels on CPU systems. For CUDA
 installs, run `./scripts/setup_env.sh cuda` instead.
 
-CPU works; CUDA is optional but recommended for training. Optical flow runs on
-CPU via OpenCV (Farneback).
+CPU works; CUDA is optional but recommended for training.  Optical flow runs on
+CPU via OpenCV (Farneback, ROI-based — only on changed regions).
 
 ## Guide: from replay to trained model
 
@@ -189,10 +190,10 @@ Output: `data/processed/<id>_match00/`, `..._match01/`, etc.
 
 Contents of each shard:
 
-| Array          | Shape              | Description                          |
-|----------------|--------------------|--------------------------------------|
-| `flow_u8.npy`       | (T-1, 2, 120, 160) | Farneback optical flow, clipped to [-1, 1] and uint8-quantized |
-| `audio_f16.npy`     | (T, 15)             | MFCC + energy features, float16    |
+| Array          | Shape                 | Description                          |
+|----------------|-----------------------|--------------------------------------|
+| `flow_u8.npy`       | (T-1, 2, H, W) | ROI-based Farneback flow, clipped to [-1, 1], uint8-quantized; resolution = `flow_width`×`flow_height` |
+| `audio_f16.npy`     | (T, 15)        | MFCC + energy features, float16    |
 | `movement_u8.npy`   | (T,)                | P1 direction index 0–8             |
 | `buttons_u8.npy`    | (T, 6)              | P1 button states {0, 1}            |
 | `p2_movement_u8.npy`| (T,)                | P2 direction index (raw, no mirror)|
@@ -297,8 +298,12 @@ All tunables in `config.py`:
 | `total_delay_frames`   | 12      | Visual total ≈ 200 ms @ 60 fps       |
 | `temporal_stride`      | 4       | Frames per recurrence step (N)       |
 | `use_audio`            | True    | Enable audio pipeline                |
-| `frame_width`          | 160     | Model optical-flow input width       |
-| `frame_height`         | 120     | Model optical-flow input height      |
+| `frame_width`          | 160     | Raw video frame width (capture)      |
+| `frame_height`         | 120     | Raw video frame height (capture)     |
+| `flow_width`           | 160     | Optical-flow output width (model input) |
+| `flow_height`          | 120     | Optical-flow output height (model input) |
+| `cnn_channels`         | 16      | FlowCNN base channels (8/12/16/24/32) |
+| `compile_model`        | True    | torch.compile the model              |
 | `context_dim`          | 64      | MatchContext opponent-profile size   |
 | `action_embed_dim`     | 64      | Prev-action embedding dimension      |
 | `feature_dim`          | 256     | Visual feature dimension             |
@@ -339,4 +344,4 @@ when P2's combo counter is non-zero (P2 is hitting P1), and vice versa.
   script, so the training data is ground-truth accurate.
 - The MatchContext GRU gives the minGRU a persistent 64-d opponent profile
   that survives BC segment boundaries and full PPO episodes.
-- Audio features use a manual 256-point DCT (no scipy dependency).
+- Audio features use a manual 256-point DCT-II (no scipy dependency).
