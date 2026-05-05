@@ -193,14 +193,14 @@ def _find_template_positions(audio: "np.ndarray",
 
 def _find_match_end_frames(p1w: "np.ndarray",
                            p2w: "np.ndarray",
+                           match_wins: int = 2,
                            ) -> "np.ndarray":
-    """Return exclusive end frame for each match — the frame where a round-win
-    counter increments to its final value (i.e. the match-point transition).
-    Works regardless of whether win counters are per-round (0→1→2 per match)
-    or per-match (0→1 per match) because it only looks for increments."""
+    """Return exclusive end frames where a player reaches *match_wins*."""
     ends = []
     for i in range(1, len(p1w)):
-        if int(p1w[i]) > int(p1w[i - 1]) or int(p2w[i]) > int(p2w[i - 1]):
+        prev_best = max(int(p1w[i - 1]), int(p2w[i - 1]))
+        curr_best = max(int(p1w[i]), int(p2w[i]))
+        if curr_best >= match_wins and curr_best > prev_best:
             ends.append(i + 1)
     return np.array(ends, dtype=np.int64)
 
@@ -218,8 +218,8 @@ def audio_match_signal(audio_path: "Path",
                        ) -> "list[tuple[int, int]]":
     """Return (start, end) frame pairs in *input-log* frame space.
 
-    Match starts come from audio template peaks plus a fixed frame offset;
-    match ends come from win-counter increments in the input log.
+    Each audio template hit starts a new match; the previous match ends
+    just before the next hit (or at end-of-data for the last one).
 
     *input_offset_frames* accounts for the video/audio recording starting
     later than the input log — it is added to audio-derived starts so they
@@ -246,13 +246,15 @@ def audio_match_signal(audio_path: "Path",
     template = _load_u8(template_path)
     audio = _load_u8(audio_path)
 
-    spf = target_sr / fps
     offsets = _find_template_positions(audio, template, corr_threshold=corr_threshold)
+    spf = target_sr / fps  # samples per frame
+
+    # Convert audio sample offsets → input-log frame starts.
     starts = np.rint(offsets / spf).astype(int)
     if start_offset_frames:
         starts = starts + int(start_offset_frames)
-    # Align audio-derived starts with input-log frame indices.
     starts = starts + int(input_offset_frames)
+
     frame_limit = None
     if p1w is not None:
         frame_limit = len(p1w)
@@ -264,20 +266,26 @@ def audio_match_signal(audio_path: "Path",
     if p1w is None or p2w is None:
         return []
 
-    ends = _find_match_end_frames(p1w, p2w)
-
-    # Pair each start with the next match-completing win transition.
+    # Each template hit starts a new match.  For all but the last match the
+    # end is the next template hit.  For the last match we look for a win-
+    # counter transition (round win or reset) to mark the end; if none is
+    # found the match runs to end-of-data.
     boundaries: list[tuple[int, int]] = []
-    ei = 0
-    for s in starts:
-        while ei < len(ends) and ends[ei] <= s:
-            ei += 1
-        if ei >= len(ends):
-            break
-        e = int(ends[ei])
-        ei += 1
-        if e - s >= min_match_len:
-            boundaries.append((int(s), e))
+    for i, s_frame in enumerate(starts):
+        s_frame = int(s_frame)
+        if i + 1 < len(starts):
+            e_frame = int(starts[i + 1])
+        else:
+            # Last match — use the last win-counter change as the end.
+            # Falls back to end-of-data if no transitions are found.
+            e_frame = len(p1w)
+            if p1w is not None and p2w is not None:
+                for j in range(s_frame + 1, len(p1w)):
+                    if int(p1w[j]) != int(p1w[j - 1]) or int(p2w[j]) != int(p2w[j - 1]):
+                        e_frame = j
+        if e_frame - s_frame >= min_match_len:
+            boundaries.append((s_frame, e_frame))
+
     return boundaries
 
 

@@ -4,11 +4,7 @@
 Each capture directory contains:
   video.raw      — 160×120 grayscale raw bytes, 60 fps
   audio.wav      — 8-bit mono 16 kHz PCM
-  input_log.txt  — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
-
-Usage:
-  python scripts/collect_data.py --capture-dir data/captures \\
-      --output-dir data/processed
+  input_log.txt  — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins reset" per line
 """
 
 from __future__ import annotations
@@ -126,7 +122,7 @@ def load_video_frames(path: Path, frame_width: int, frame_height: int) -> np.nda
 
 # ---------------------------------------------------------------------------
 def parse_input_log(path: Path) -> tuple:
-    """Returns (p1_mov, p1_btn, p2_mov, p2_btn, hp1, hp2, stun1, stun2, timer, p1w, p2w)."""
+    """Returns (p1_mov, p1_btn, p2_mov, p2_btn, hp1, hp2, stun1, stun2, timer, p1w, p2w, reset)."""
     lines = path.read_text().strip().splitlines()
     T = len(lines)
     p1_mov = np.zeros(T, dtype=np.int64)
@@ -140,6 +136,7 @@ def parse_input_log(path: Path) -> tuple:
     timer = np.zeros(T, dtype=np.int32)
     p1w = np.zeros(T, dtype=np.int32)
     p2w = np.zeros(T, dtype=np.int32)
+    reset = np.zeros(T, dtype=np.int32)
 
     for i, line in enumerate(lines):
         parts = line.split()
@@ -159,7 +156,7 @@ def parse_input_log(path: Path) -> tuple:
         for b in bs2:
             p2_btn[i, int(b)] = 1.0
 
-        if len(parts) >= 10:
+        if len(parts) >= 11:
             hp1[i] = float(parts[3])
             hp2[i] = float(parts[4])
             stun1[i] = int(parts[5])
@@ -167,14 +164,8 @@ def parse_input_log(path: Path) -> tuple:
             timer[i] = int(parts[7])
             p1w[i] = int(parts[8])
             p2w[i] = int(parts[9])
-        elif len(parts) >= 7:
-            # back-compat: old 7-field format (no P2 bits or stun)
-            hp1[i] = float(parts[2])
-            hp2[i] = float(parts[3])
-            timer[i] = int(parts[4])
-            p1w[i] = int(parts[5])
-            p2w[i] = int(parts[6])
-    return p1_mov, p1_btn, p2_mov, p2_btn, hp1, hp2, stun1, stun2, timer, p1w, p2w
+            reset[i] = int(parts[10])
+    return p1_mov, p1_btn, p2_mov, p2_btn, hp1, hp2, stun1, stun2, timer, p1w, p2w, reset
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +279,7 @@ def main():
             continue
 
         # ---- inputs ----
-        p1_mov, p1_btn, p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2, timer, p1w, p2w = \
+        p1_mov, p1_btn, p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2, timer, p1w, p2w, reset = \
             parse_input_log(log)
         n_frames = len(p1_mov)
         if n_frames < 120:

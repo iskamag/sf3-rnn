@@ -26,6 +26,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import Config
@@ -41,23 +42,20 @@ def load_video(path: Path, w: int, h: int) -> np.ndarray | None:
     return np.frombuffer(raw, dtype=np.uint8).reshape(n, h, w)
 
 
-def parse_log(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Parse round wins from input_log.txt."""
+def parse_log(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Parse round wins and reset flag from input_log.txt."""
     lines = path.read_text().strip().splitlines()
     T = len(lines)
     p1w = np.zeros(T, dtype=np.int32)
     p2w = np.zeros(T, dtype=np.int32)
+    reset = np.zeros(T, dtype=np.int32)
     for i, line in enumerate(lines):
         parts = line.split()
-        if len(parts) < 5:
-            continue
-        if len(parts) >= 10:
+        if len(parts) >= 11:
             p1w[i] = int(parts[8])
             p2w[i] = int(parts[9])
-        elif len(parts) >= 7:
-            p1w[i] = int(parts[5])
-            p2w[i] = int(parts[6])
-    return p1w, p2w
+            reset[i] = int(parts[10])
+    return p1w, p2w, reset
 
 
 def boundaries_to_mask(bounds: list[tuple[int, int]], n: int) -> np.ndarray:
@@ -72,29 +70,31 @@ def draw_overlay(frame: np.ndarray, idx: int, match_idx: int,
                  total_frames: int, total_matches: int,
                  fps: int, playing: bool,
                  show_flow: bool, flow_frame: np.ndarray | None) -> np.ndarray:
-    H, W = 120, 160
-    out = np.zeros((H + 28, W, 3), dtype=np.uint8)
+    H, W = 120, 160       # video resolution
+    CANVAS_W = 400        # wider canvas so info bar isn't clipped
+    BAR_H = 36
+    OX = (CANVAS_W - W) // 2  # horizontal offset to centre the video
+    out = np.zeros((H + BAR_H, CANVAS_W, 3), dtype=np.uint8)
 
     if show_flow and flow_frame is not None:
-        # Normalise flow to [0,255] for HSV colour-wheel visualisation.
         mag, ang = cv2.cartToPolar(flow_frame[0], flow_frame[1])
         hsv = np.zeros((H, W, 3), dtype=np.uint8)
         hsv[..., 0] = (ang * 90 / np.pi).astype(np.uint8)
         hsv[..., 1] = 255
         hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
         flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-        out[:H, :W] = flow_bgr
+        out[:H, OX:OX + W] = flow_bgr
     else:
-        out[:H, :W] = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        out[:H, OX:OX + W] = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-    # Match-boundary border.
+    # Match-boundary border around the video region.
     if match_idx >= 0:
         cols = [(0, 200, 0), (0, 160, 200), (200, 120, 0), (160, 0, 200),
                 (0, 200, 200), (200, 0, 160)]
         colour = cols[match_idx % len(cols)]
-        cv2.rectangle(out, (0, 0), (W - 1, H - 1), colour, 2)
+        cv2.rectangle(out, (OX, 0), (OX + W - 1, H - 1), colour, 2)
     else:
-        cv2.rectangle(out, (0, 0), (W - 1, H - 1), (80, 80, 80), 2)
+        cv2.rectangle(out, (OX, 0), (OX + W - 1, H - 1), (80, 80, 80), 2)
 
     # Info bar.
     sec = idx / fps
@@ -104,9 +104,12 @@ def draw_overlay(frame: np.ndarray, idx: int, match_idx: int,
         status = "menu / select"
     text = f"frame {idx}/{total_frames}  {sec:.1f}s  [{status}]"
     if playing:
-        text += "  ▶"
-    cv2.putText(out, text, (4, H + 18), cv2.FONT_HERSHEY_SIMPLEX,
-                0.4, (200, 200, 200), 1, cv2.LINE_AA)
+        text += "  PLAY"
+    cv2.putText(out, text, (4, H + 14), cv2.FONT_HERSHEY_SIMPLEX,
+                0.5, (220, 220, 220), 1, cv2.LINE_AA)
+    hints = "[ ] match  a/d step  w/s +-60  spc play  m flow  q quit"
+    cv2.putText(out, hints, (4, H + 30), cv2.FONT_HERSHEY_SIMPLEX,
+                0.35, (140, 140, 140), 1, cv2.LINE_AA)
     return out
 
 
@@ -141,7 +144,7 @@ def main():
         print("Cannot read video frames")
         return
 
-    p1w, p2w = parse_log(log)
+    p1w, p2w, _reset = parse_log(log)
     n = len(frames)
     template = args.match_template
     if not template.is_absolute():
@@ -181,8 +184,10 @@ def main():
     playing = False
     show_flow = False
     flow_cache: tuple[int, np.ndarray | None] = (-1, None)
+    frame_time = 1.0 / cfg.fps  # target seconds per frame
 
     while True:
+        t0 = time.perf_counter()
         frame = frames[idx]
         match_idx = match_mask[idx]
 
@@ -196,8 +201,12 @@ def main():
         out = draw_overlay(frame, idx, match_idx, n, len(bounds), cfg.fps, playing, show_flow, flow)
         cv2.imshow("capture", out)
 
-        # Use a short poll so trackbar drags are picked up immediately.
-        delay = 16 if playing else 5
+        # Wait the remaining time to hit the target frame rate.
+        elapsed = time.perf_counter() - t0
+        if playing:
+            delay = max(1, int((frame_time - elapsed) * 1000))
+        else:
+            delay = 5  # idle poll for trackbar responsiveness
         key_raw = cv2.waitKey(delay)
 
         tb_pos = cv2.getTrackbarPos("frame", "capture")

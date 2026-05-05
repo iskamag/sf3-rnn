@@ -2,7 +2,7 @@
 -- Drop in FBNeo directory, run with:  fcadefbneo.exe ... -lua input_log.lua
 --
 -- Output format (one line per frame):
---   <frame> <p1_bits> <p2_bits> <p1_hp> <p2_hp> <p1_stun> <p2_stun> <timer> <p1_wins> <p2_wins>
+--   <frame> <p1_bits> <p2_bits> <p1_hp> <p2_hp> <p1_stun> <p2_stun> <timer> <p1_wins> <p2_wins> <reset>
 
 local out_path = os.getenv("ST_RNN_INPUT_LOG") or "input_log.txt"
 local out = io.open(out_path, "w")
@@ -93,28 +93,46 @@ local function update_round_wins(p1_hp, p2_hp, timer)
     end
 end
 
+local function detect_console_reset(p1_bits, p2_bits)
+    -- Look for system-level keys that trigger a console reset or service menu.
+    -- FBNeo exposes these as joypad entries without the "P1"/"P2" prefix.
+    local j = joypad.get()
+    local system_key = (j["Service"] or j["Test"] or j["Reset"]
+                        or j["Diagnostic"] or j["Service Mode"]
+                        or j["Service 1"] or j["Service 2"])
+
+    -- CPS3 also maps Service / Diagnostic to the P1 / P2 bitfields.
+    -- P1_bit(11) = 2048 is the Service key on CPS3.
+    local p1_service = (p1_bits >= 2048)
+    local p2_service = (p2_bits >= 2048)
+
+    return system_key or p1_service or p2_service
+end
+
 local function log_frame()
     local p1_bits = read_bits("P1")
     local p2_bits = read_bits("P2")
 
-    -- Game state from memory
+    -- Must read health AFTER inputs because update_round_wins depends on
+    -- health values from the *current* frame and detect_console_reset
+    -- depends on win counters from the *previous* frame.
     local p1_hp  = memory.readbyte(P1_HEALTH) / MAX_HEALTH
     local p2_hp  = memory.readbyte(P2_HEALTH) / MAX_HEALTH
-    -- P1 in stun = P2's combo counter is non-zero (P2 is hitting P1)
     local p1_stun = memory.readbyte(P2_COMBO) ~= 0 and 1 or 0
-    -- P2 in stun = P1's combo counter is non-zero (P1 is hitting P2)
     local p2_stun = memory.readbyte(P1_COMBO) ~= 0 and 1 or 0
     local timer   = memory.readbyte(ROUND_TIMER)
 
+    local reset = detect_console_reset(p1_bits, p2_bits) and 1 or 0
+
     update_round_wins(p1_hp, p2_hp, timer)
 
-    out:write(string.format("%d %d %d %.3f %.3f %d %d %d %d %d\n",
-        frame, p1_bits, p2_bits, p1_hp, p2_hp, p1_stun, p2_stun, timer, p1_wins, p2_wins))
+    out:write(string.format("%d %d %d %.3f %.3f %d %d %d %d %d %d\n",
+        frame, p1_bits, p2_bits, p1_hp, p2_hp, p1_stun, p2_stun, timer, p1_wins, p2_wins, reset))
     out:flush()
     frame = frame + 1
 end
 
-print("input_log.lua: logging (frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins)")
+print("input_log.lua: logging (frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins reset)")
 while true do
     log_frame()
     emu.frameadvance()
