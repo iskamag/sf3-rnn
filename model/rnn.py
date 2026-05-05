@@ -1,10 +1,10 @@
 """CNN + (optional) Audio + MatchContext -> minGRU policy model for SF3.
 
 Visual:    N optical-flow frames  →  pool  →  FlowCNN  →  feature_dim
-Audio:     N MFCC+energy frames   →  pool  →  AudioMLP →  audio_dim
-Context:   minGRU output          →  MatchContext  →  context_dim
+Audio:     N MFCC+energy frames   → encode →  max-pool →  audio_dim
+Context:   minGRU output          →  MatchContext (multi-layer GRU)  →  context_dim
 Fused:     [vis, aud, ctx, ego, prev_actions]  →  minGRU
-                                                    →  [hidden + pos_embedₙ] → N action heads
+                                                     →  [hidden + pos_embedₙ] → N action heads
 
 The model runs once per *temporal_stride* (N) frames and produces N consecutive
 action sets in one recurrence step — matching the human ~67 ms decision cadence.
@@ -19,6 +19,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from minGRU_pytorch import minGRU
 
 from model.context import MatchContext
@@ -119,7 +120,8 @@ class SF3RNN(nn.Module):
                  use_audio: bool = True,
                  audio_dim: int = 64,
                  audio_feat_dim: int = 15,
-                 context_dim: int = 64,
+                 context_dim: int = 128,
+                 context_layers: int = 2,
                  action_embed_dim: int = 64,
                  temporal_stride: int = 4,
                  mingru_hidden: int = 512,
@@ -134,6 +136,7 @@ class SF3RNN(nn.Module):
         self.mingru_layers = mingru_layers
         self.use_audio = use_audio
         self.context_dim = context_dim
+        self.context_layers = context_layers
         self.num_directions = num_directions
         self.num_buttons = num_buttons
         self.temporal_stride = temporal_stride
@@ -143,11 +146,21 @@ class SF3RNN(nn.Module):
 
         self.encoder = _FlowEncoder(feature_dim, cnn_channels)
 
-        # Single-action embedder — applied per-frame, then pooled across N
+        # Per-frame action embedder
         self._action_embed = nn.Sequential(
             nn.Linear(self.action_dim, action_embed_dim),
             nn.ReLU(),
             nn.Linear(action_embed_dim, action_embed_dim),
+        )
+
+        # Temporal encoder over the N prev-action embeddings — a depthwise 1D
+        # causal conv preserves intra-stride button-press ordering (e.g.
+        # LP→MP→HP vs MP→LP→HP produce different encodings, unlike mean-pool).
+        self._action_temporal = nn.Sequential(
+            nn.Conv1d(action_embed_dim, action_embed_dim,
+                      kernel_size=3, padding=0, groups=action_embed_dim),
+            nn.ReLU(),
+            nn.Conv1d(action_embed_dim, action_embed_dim, kernel_size=1),
         )
 
         # +1 for the ego_player indicator bit (0=P1, 1=P2)
@@ -158,7 +171,7 @@ class SF3RNN(nn.Module):
         else:
             self.audio_encoder = None
 
-        self.match_context = MatchContext(mingru_hidden, context_dim)
+        self.match_context = MatchContext(mingru_hidden, context_dim, context_layers)
 
         self.recurrent = _MinGRUStack(recurrent_input, mingru_hidden,
                                        mingru_layers, mingru_dropout)
@@ -182,7 +195,7 @@ class SF3RNN(nn.Module):
         )
 
         self.hidden: HiddenState = None
-        self._context: Optional[torch.Tensor] = None                   # (B, context_dim)
+        self._context: Optional[torch.Tensor] = None                   # (L, B, context_dim)
         self._prev_action: Optional[torch.Tensor] = None                # (B, N, 15)
 
     # ------------------------------------------------------------------
@@ -196,12 +209,38 @@ class SF3RNN(nn.Module):
             self._context = self._context.detach()
 
     # ------------------------------------------------------------------
+    def _encode_prev_actions(self, prev_actions: torch.Tensor
+                             ) -> torch.Tensor:
+        """Encode N previous action distributions → (B, T, E) vector.
+
+        Uses a per-frame MLP followed by a small causal 1D conv that
+        preserves intra-stride ordering (unlike mean-pool).
+        """
+        B, T, N = prev_actions.shape[:3]
+
+        # Per-frame embedding
+        emb = self._action_embed(prev_actions)                       # (B, T, N, E)
+
+        # Causal temporal conv over the N frames
+        BT = B * T
+        x = emb.reshape(BT, N, -1).permute(0, 2, 1)                  # (BT, E, N)
+        x = F.pad(x, (2, 0))                                          # causal left-pad
+        x = self._action_temporal(x)                                  # (BT, E, N)
+        return x[:, :, -1].reshape(B, T, -1)                          # (B, T, E)
+
+    def _encode_prev_actions_fallback(self, B: int, T: int, device: torch.device
+                                      ) -> torch.Tensor:
+        """Zero-initialised prev-action encoding when no prior is available."""
+        return torch.zeros(B, T, self._action_embed[-1].out_features,
+                           device=device)
+
+    # ------------------------------------------------------------------
     def forward(self,
                 flows: torch.Tensor,                          # (B, T, N, 2, H, W)
                 ego_player: torch.Tensor,                      # (B, 1) float 0=P1, 1=P2
                 hidden: HiddenState = None,
                 audio: Optional[torch.Tensor] = None,          # (B, T, N, 15) or (B, T, 15)
-                context: Optional[torch.Tensor] = None,         # (B, C) initial context
+                context: Optional[torch.Tensor] = None,         # (L, B, C) multi-layer state
                 prev_actions: Optional[torch.Tensor] = None,    # (B, T, N, D)  D=num_dir+num_btn
                 ) -> Dict[str, torch.Tensor]:
         B, T, N = flows.shape[:3]
@@ -211,33 +250,32 @@ class SF3RNN(nn.Module):
         flow_pooled_frames = flows.mean(dim=2)                     # (B, T, 2, H, W)
         flow_feat = self.encoder(flow_pooled_frames)               # (B, T, F)
 
-        # --- audio ---
+        # --- audio: encode per-frame, then max-pool (captures onset events) ---
         aud_pooled = None
         if self.use_audio:
             if audio is None:
                 raise ValueError("use_audio=True but no audio tensor passed to forward()")
-            if audio.dim() == 4:                                       # (B, T, N, 15) → pool
-                aud_pooled = audio.mean(dim=2)                         # (B, T, 15)
+            if audio.dim() == 4:                                       # (B, T, N, 15)
+                aud_encoded = self.audio_encoder(audio)                # (B, T, N, A)
+                aud_pooled = aud_encoded.max(dim=2).values             # (B, T, A) — max for onsets
             else:
-                aud_pooled = audio                                     # (B, T, 15) already pooled
-            aud_pooled = self.audio_encoder(aud_pooled)                # (B, T, A)
+                aud_pooled = self.audio_encoder(audio)                 # (B, T, 15) already pooled
 
-        # --- context ---
+        # --- context: multi-layer GRU state, last layer feeds minGRU ---
         if context is None:
-            ctx = self.match_context.initial_context(B, device)
+            full_ctx = self.match_context.initial_context(B, device)   # (L, B, C)
         else:
-            ctx = context
+            full_ctx = context                                         # (L, B, C)
+        ctx = full_ctx[-1]                                             # (B, C) for minGRU input
 
         # --- ego player ---
         ego = ego_player.unsqueeze(1).expand(-1, T, -1)               # (B, T, 1)
 
-        # --- previous actions ---
+        # --- previous actions: temporal conv preserves intra-stride ordering ---
         if prev_actions is not None:
-            act_emb = self._action_embed(prev_actions)                 # (B, T, N, E)
-            act_emb = act_emb.mean(dim=2)                              # (B, T, E)
+            act_emb = self._encode_prev_actions(prev_actions)          # (B, T, E)
         else:
-            act_emb = torch.zeros(B, T, self._action_embed[-1].out_features,
-                                  device=device)
+            act_emb = self._encode_prev_actions_fallback(B, T, device)
 
         # --- recurrent core ---
         ctx_seq = ctx.unsqueeze(1).expand(-1, T, -1)                  # (B, T, C)
@@ -253,14 +291,14 @@ class SF3RNN(nn.Module):
         slot_in = self._action_proj(h_exp)                             # (B, T, N, H)
 
         # --- update context ---
-        ctx = self.match_context(recurrent_out[:, -1], ctx)
+        full_ctx = self.match_context(recurrent_out[:, -1], full_ctx)
 
         return {
             "movement": self.movement_head(slot_in),                   # (B, T, N, 9)
             "buttons":  self.button_head(slot_in),                     # (B, T, N, 6)
             "value":    self.value_head(slot_in).squeeze(-1),          # (B, T, N)
             "hidden":   hidden,
-            "context":  ctx,
+            "context":  full_ctx,                                       # (L, B, C)
         }
 
     # ------------------------------------------------------------------
