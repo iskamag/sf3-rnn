@@ -27,6 +27,15 @@ local p1_wins = 0
 local p2_wins = 0
 local round_over = false
 
+-- emu.registerstop fires when the replay stream ends / emulation halts.
+-- This is the clean signal — no guessing, no timing hacks.
+emu.registerstop(function()
+    out:write("REPLAY_END\n")
+    out:flush()
+    out:close()
+    os.exit(0)
+end)
+
 local function read_bits(prefix)
     -- CPS3/SF3 uses per-game button names, not generic "P1 Button N" (cf. fbneo-training-mode)
     local j = joypad.get()

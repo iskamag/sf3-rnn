@@ -421,8 +421,26 @@ capture_one() {
         head -c 300 "$gst_err"
     fi
 
-    # Wait for emulator to exit.
-    wait $emu_pid 2>/dev/null || true
+    # Wait for emulator to exit, or kill it when Lua writes REPLAY_END.
+    _wait_emu_done() {
+        local pid="$1"
+        local log_path="$2"
+
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 2
+
+            kill -0 "$pid" 2>/dev/null || break
+
+            if [ -f "$log_path" ] && grep -q "REPLAY_END" "$log_path" 2>/dev/null; then
+                echo "  replay-end marker detected — stopping emulator"
+                kill "$pid" 2>/dev/null || true
+                sleep 1
+                break
+            fi
+        done
+    }
+
+    _wait_emu_done "$emu_pid" "$(_current_input_log_path)"
 
     _stop_recorders
     _terminate_emulator_processes
