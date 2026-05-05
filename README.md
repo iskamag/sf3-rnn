@@ -203,7 +203,7 @@ Aim for at least 50–100 matches for BC training to be useful.
 
 To create a shorter 1-second match-start cue sample:
 ```bash
-ffmpeg -y -i hmm_16k.wav -t 1.0 -acodec copy hmm_16k_1s.wav
+ffmpeg -y -i hmm_16k.wav -t 1.0 -c:a copy hmm_16k_1s.wav
 ```
 
 To inspect a capture (match boundaries, optical flow):
