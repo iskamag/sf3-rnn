@@ -113,6 +113,7 @@ st-rnn/
     ├── collect_data.py        # Capture → shard pipeline
     ├── train_bc.py            # BC training entry point
     ├── train_rl.py            # PPO fine-tuning entry point
+    ├── view_capture.py        # Visualise captures with match-boundary overlay
     └── run_bot.py             # Real-time inference
 ```
 
@@ -144,8 +145,7 @@ cp -r Fightcade/emulator/fbneo/* ~/fightcade-emu/
 cp sfiii3nr1.zip ~/fightcade-emu/ROMs/
 ```
 
-Also required: `wine`, `gamescope`, `ffmpeg` (with VAAPI), `pipewire`,
-`pw-v4l2`.
+Also required: `wine`, `gamescope`, `gstreamer`, `pipewire`, and `xdotool`.
 
 ### 2. Capture replays
 
@@ -175,17 +175,20 @@ are ignored), then fan out across parallel workers:
 ```
 
 You can also pass the file directly to `capture_replay.sh` to process
-sequentially in a single worker.  Workers are safe to run in parallel —
-each gets its own wine prefix (`~/.fightcade-wine-<N>`), null audio sink,
-and temp directory.  Audio is captured from the application output
-(monitor source), not the microphone.
+sequentially in a single worker. `capture_all.sh` fans out across worker
+slots, but reliable `input_log.txt` collection still depends on FBNeo
+honouring the per-worker log filename override. If logs collide, fall back to
+single-worker capture. Audio is captured from PipeWire application streams,
+not the microphone.
 
 What happens per replay:
 1. `gamescope` launches the emulator with `input_log.lua`
 2. A screencast dialog appears — **accept it**
 3. GStreamer captures the gamescope window as 160×120 GRAY8 raw video
-4. ffmpeg captures wine's audio as 8-bit 16 kHz mono WAV
-5. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
+4. GStreamer captures the emulator audio stream as 8-bit 16 kHz mono WAV
+5. After replay load, the script double-clicks the nested X display to switch
+   FBNeo back to fullscreen
+6. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
    timer, and wins to `input_log.txt`
 
 Output in `data/captures/<challenge_id>/`:
@@ -198,16 +201,29 @@ input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2
 Repeat for many replays — different players, characters, skill levels.
 Aim for at least 50–100 matches for BC training to be useful.
 
+To create a shorter 1-second match-start cue sample:
+```bash
+ffmpeg -y -i hmm_16k.wav -t 1.0 -acodec copy hmm_16k_1s.wav
+```
+
+To inspect a capture (match boundaries, optical flow):
+```bash
+./scripts/train.sh view data/captures/1777895668498-5828 \
+    --match-template hmm_16k_1s.wav
+```
+
 ### 3. Process into training data
 
 Converts the captures into mmap-friendly shard directories the dataset can
-read. Each shard contains one match (character select / intros trimmed
-automatically via health-bar transitions).
+ read. Each shard contains one match (audio-template starts paired with
+ logged match-end wins, with `match_start_offset_frames` skipping ahead from
+ the cue to the actual gameplay start).
 
 ```bash
 ./scripts/train.sh collect \
     --capture-dir data/captures \
-    --output-dir data/processed
+    --output-dir data/processed \
+    --match-template hmm_16k_1s.wav
 ```
 
 Output: `data/processed/<id>_match00/`, `..._match01/`, etc.
@@ -326,6 +342,7 @@ All tunables in `config.py`:
 | `frame_height`         | 120     | Raw video frame height (capture)     |
 | `flow_width`           | 160     | Optical-flow output width (model input) |
 | `flow_height`          | 120     | Optical-flow output height (model input) |
+| `match_start_offset_frames` | 20 | Frames skipped after the start cue   |
 | `cnn_channels`         | 16      | FlowCNN base channels (8/12/16/24/32) |
 | `compile_model`        | True    | torch.compile the model              |
 | `context_dim`          | 64      | MatchContext opponent-profile size   |
