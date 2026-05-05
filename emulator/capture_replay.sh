@@ -91,11 +91,14 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-# ---- Video (gstreamer pipewiresrc) + Audio (ffmpeg pulse) ----
+# ---- Video (gstreamer pipewiresrc) + Audio (ffmpeg pulse via monitor) ----
 echo "[3/3] Recording …"
 
+AUDIO_SRC="$(pactl get-default-sink 2>/dev/null).monitor"
+echo "  audio source: ${AUDIO_SRC}"
+
 ffmpeg -y -v warning \
-    -f pulse -i default \
+    -f pulse -i "${AUDIO_SRC}" \
     -vn -c:a pcm_u8 -ar 16000 -ac 1 \
     "$OUT_DIR/audio.wav" \
     2>/tmp/st_rnn_audio_err &
