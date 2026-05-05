@@ -99,7 +99,8 @@ st-rnn/
 │   └── game_state.py          # Health-bar detection and HUD extraction
 ├── emulator/
 │   ├── input_log.lua          # FBNeo Lua script — logs P1/P2 inputs, health, stun
-│   ├── capture_replay.sh      # Launch + capture video/audio/inputs
+│   ├── capture_replay.sh      # Capture single replay or file of IDs (worker-based, parallel-safe)
+│   ├── capture_all.sh         # Parallel batch capture — fans out a list file across workers
 │   └── start_screencast.py    # XDG Desktop Portal screencast helper
 ├── data/
 │   └── dataset.py             # PyTorch Dataset (shard directories)
@@ -146,25 +147,48 @@ cp sfiii3nr1.zip ~/fightcade-emu/ROMs/
 Also required: `wine`, `gamescope`, `ffmpeg` (with VAAPI), `pipewire`,
 `pw-v4l2`.
 
-### 2. Capture a replay
+### 2. Capture replays
 
-Pick a replay from [fightcade.com](https://www.fightcade.com/game/sfiii3nr1).
-Copy its URL — e.g. `https://replay.fightcade.com/fbneo/sfiii3nr1/1777806845400-9194`.
+Pick replays from [fightcade.com](https://www.fightcade.com/game/sfiii3nr1).
+Copy their URLs — e.g. `https://replay.fightcade.com/fbneo/sfiii3nr1/1777806845400-9194`.
 The last segment (`1777806845400-9194`) is the challenge ID.
+
+**Single replay:**
 
 ```bash
 ./emulator/capture_replay.sh 1777806845400-9194
 ```
 
-What happens:
+**Batch capture** — create a file with one ID per line (lines starting with `#`
+are ignored), then fan out across parallel workers:
+
+```
+# replay_ids.txt
+1777806845400-9194
+1777895668498-5828
+1778123456789-1234
+```
+
+```bash
+./emulator/capture_all.sh replay_ids.txt          # 4 workers (default)
+./emulator/capture_all.sh replay_ids.txt 8        # 8 workers
+```
+
+You can also pass the file directly to `capture_replay.sh` to process
+sequentially in a single worker.  Workers are safe to run in parallel —
+each gets its own wine prefix (`~/.fightcade-wine-<N>`), null audio sink,
+and temp directory.  Audio is captured from the application output
+(monitor source), not the microphone.
+
+What happens per replay:
 1. `gamescope` launches the emulator with `input_log.lua`
 2. A screencast dialog appears — **accept it**
-3. GStreamer captures the gamescope window as 160×120 GRAY8 raw video + 8-bit
-   16 kHz mono WAV audio
-4. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
+3. GStreamer captures the gamescope window as 160×120 GRAY8 raw video
+4. ffmpeg captures wine's audio as 8-bit 16 kHz mono WAV
+5. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
    timer, and wins to `input_log.txt`
 
-Output in `data/captures/1777806845400-9194/`:
+Output in `data/captures/<challenge_id>/`:
 ```
 video.raw       — 160×120 GRAY8 raw frame bytes, 60 fps
 audio.wav       — 8-bit mono 16 kHz PCM
