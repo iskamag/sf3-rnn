@@ -100,6 +100,39 @@ def _dct(x: np.ndarray, n_coeffs: int) -> np.ndarray:
     return y
 
 
+def _dct_batch(x: np.ndarray, n_coeffs: int) -> np.ndarray:
+    """DCT-II for batched input.  x: (N, M) → (N, n_coeffs)."""
+    N, M = x.shape
+    k = np.arange(n_coeffs, dtype=np.float32)
+    n = np.arange(M, dtype=np.float32)
+    cos_mat = np.cos(np.pi * k[:, None] * (n[None, :] + 0.5) / M)
+    return 2.0 * (x @ cos_mat.T.astype(np.float32))
+
+
+_MEL_FB_CACHE: dict[int, np.ndarray] = {}
+
+
+def _get_mel_filterbank(sample_rate: int = 16000) -> np.ndarray:
+    """Return the (40, FFT_SIZE//2) mel filterbank matrix, lazily cached."""
+    if sample_rate not in _MEL_FB_CACHE:
+        n_mels = 40
+        freqs = np.fft.rfftfreq(FFT_SIZE, 1.0 / sample_rate)[1:]
+        mel_low = _hz_to_mel(0)
+        mel_high = _hz_to_mel(sample_rate / 2)
+        mel_pts = np.linspace(mel_low, mel_high, n_mels + 2)
+        hz_pts = _mel_to_hz(mel_pts)
+        fbank = np.zeros((n_mels, len(freqs)), dtype=np.float32)
+        for m in range(n_mels):
+            left, centre, right = hz_pts[m], hz_pts[m + 1], hz_pts[m + 2]
+            for k, f in enumerate(freqs):
+                if left <= f < centre:
+                    fbank[m, k] = (f - left) / (centre - left + 1e-10)
+                elif centre <= f <= right:
+                    fbank[m, k] = (right - f) / (right - centre + 1e-10)
+        _MEL_FB_CACHE[sample_rate] = fbank
+    return _MEL_FB_CACHE[sample_rate]
+
+
 def _hz_to_mel(hz: float) -> float:
     return 2595.0 * np.log10(1.0 + hz / 700.0)
 

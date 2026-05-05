@@ -18,14 +18,16 @@ def compute_flow(prev_gray: np.ndarray,
     Returns
     -------
     flow : np.ndarray  (2, H, W) float32  —  [0] = dx, [1] = dy
+
+    Parameters are tuned for speed on 160×120 game frames — the flow is
+    quantised to uint8 afterward, so fine precision is wasted anyway.
     """
     flow = cv2.calcOpticalFlowFarneback(
         prev_gray, curr_gray, None,
-        pyr_scale=0.5, levels=3, winsize=15,
-        iterations=3, poly_n=5, poly_sigma=1.1,
-        flags=0,
+        pyr_scale=0.5, levels=1, winsize=7,
+        iterations=1, poly_n=3, poly_sigma=1.2,
+        flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN,
     )
-    # cv2 returns (H, W, 2) → (2, H, W)
     return np.ascontiguousarray(flow.transpose(2, 0, 1), dtype=np.float32)
 
 

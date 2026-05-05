@@ -14,17 +14,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import cv2
 import numpy as np
 from tqdm import tqdm
 
 from config import Config
 from data.shard import FLOW_MAX, FLOW_MIN, quantize_flow, write_json
 from model.action_space import bitfield_to_action
-from vision.optical_flow import compute_flow, preprocess_flow
-from vision.audio_features import extract_features
+from vision.optical_flow import compute_flow
+from vision.audio_features import _dct_batch, _get_mel_filterbank
 from vision.game_state import find_match_boundaries
 
 
@@ -53,22 +56,61 @@ def load_audio_features(wav_path: Path, num_frames: int,
             np.linspace(0, len(samples) - 1, n_out),
             np.arange(len(samples)), samples).astype(np.float32)
 
+    if num_frames == 0:
+        return np.zeros((0, 15), dtype=np.float32)
+
     fft_window = 256
     half_window = fft_window // 2
     samples_per_frame = sample_rate / fps
-    feats = np.zeros((num_frames, 15), dtype=np.float32)
-    for i in range(num_frames):
-        center = int(round((i + 0.5) * samples_per_frame))
-        start = center - half_window
-        end = start + fft_window
-        chunk = np.zeros(fft_window, dtype=np.float32)
-        src_start = max(start, 0)
-        src_end = min(end, len(samples))
+
+    # Build all windows at once — use sliding_window_view for interior
+    # frames (the vast majority) and a manual loop only for boundaries.
+    chunks_raw = np.zeros((num_frames, fft_window), dtype=np.float32)
+    window = np.hanning(fft_window).astype(np.float32)
+    centers = np.round((np.arange(num_frames) + 0.5) * samples_per_frame).astype(int)
+    starts = centers - half_window
+
+    valid = (starts >= 0) & (starts + fft_window <= len(samples))
+    if valid.any():
+        windows = np.lib.stride_tricks.sliding_window_view(samples, fft_window)
+        chunks_raw[valid] = windows[starts[valid]]
+
+    for i in np.where(~valid)[0]:
+        src_start = max(starts[i], 0)
+        src_end = min(starts[i] + fft_window, len(samples))
         if src_end > src_start:
-            dst_start = src_start - start
-            chunk[dst_start:dst_start + (src_end - src_start)] = samples[src_start:src_end]
-            feats[i] = extract_features(chunk, sample_rate)
-    return feats
+            dst_start = src_start - starts[i]
+            chunk_len = src_end - src_start
+            chunks_raw[i, dst_start:dst_start + chunk_len] = samples[src_start:src_end]
+
+    # RMS energy (dB-scaled) from raw (unwindowed) chunks
+    rms = np.sqrt(np.mean(chunks_raw.astype(np.float64) ** 2, axis=1))
+    rms_db = 20.0 * np.log10(rms + 1e-10)
+    rms_db = np.clip(rms_db, -60.0, 0.0) / 60.0 + 1.0
+
+    # Apply Hann window (zero-padded regions stay 0)
+    chunks = chunks_raw * window
+
+    # Batched FFT
+    fft = np.fft.rfft(chunks)                               # (N, 129)
+    mag = np.abs(fft[:, 1:])                                 # (N, 128) skip DC
+    power = mag * mag
+
+    # Mel filterbank (matrix multiply)
+    fbank = _get_mel_filterbank(sample_rate)                 # (40, 128)
+    mel_energies = power @ fbank.T                           # (N, 40)
+    log_mel = np.log(mel_energies + 1e-10)
+
+    # DCT-II
+    mfccs = _dct_batch(log_mel, 13)                          # (N, 13)
+
+    # Spectral centroid
+    freqs = np.fft.rfftfreq(fft_window, 1.0 / sample_rate)[1:]
+    centroid = np.sum(freqs * mag, axis=1) / (np.sum(mag, axis=1) + 1e-10)
+    centroid_norm = np.clip(centroid / (sample_rate / 2), 0.0, 1.0)
+
+    feats = np.column_stack([mfccs, rms_db, centroid_norm])
+    return feats.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +220,21 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
 
 
 # ---------------------------------------------------------------------------
+def _compute_flow_pair(args):
+    i, prev, curr, frame_width, frame_height, flow_norm = args
+    flow = compute_flow(prev, curr)                            # (2, H, W) f32
+    h, w = flow.shape[1], flow.shape[2]
+    if h != frame_height or w != frame_width:
+        flow = cv2.resize(flow.transpose(1, 2, 0),
+                          (frame_width, frame_height),
+                          interpolation=cv2.INTER_LINEAR)
+        flow = np.ascontiguousarray(flow.transpose(2, 0, 1), dtype=np.float32)
+    flow /= flow_norm
+    clipped = np.clip(flow, FLOW_MIN, FLOW_MAX)
+    return i, quantize_flow(clipped)
+
+
+# ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser(description="Convert captures to training shards")
     p.add_argument("--capture-dir", type=Path, default=Path("data/captures"))
@@ -232,11 +289,16 @@ def main():
 
         nf = min(len(frames) - 1, n_frames - 1)
         flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.uint8)
-        for i in range(nf):
-            flow = preprocess_flow(compute_flow(frames[i], frames[i + 1]),
-                                   cfg.frame_width, cfg.frame_height,
-                                   cfg.flow_norm).numpy()
-            flows[i] = quantize_flow(flow)
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as pool:
+            futures = [
+                pool.submit(_compute_flow_pair,
+                            (i, frames[i], frames[i + 1],
+                             cfg.frame_width, cfg.frame_height, cfg.flow_norm))
+                for i in range(nf)
+            ]
+            for fut in as_completed(futures):
+                i, flow = fut.result()
+                flows[i] = flow
 
         # ---- audio ----
         if audio.exists() and cfg.use_audio:
