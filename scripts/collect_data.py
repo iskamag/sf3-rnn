@@ -211,6 +211,8 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
         "fps": cfg.fps,
         "frame_width": cfg.frame_width,
         "frame_height": cfg.frame_height,
+        "flow_width": cfg.flow_width,
+        "flow_height": cfg.flow_height,
         "flow_dtype": "uint8",
         "flow_min": FLOW_MIN,
         "flow_max": FLOW_MAX,
@@ -288,12 +290,12 @@ def main():
             continue
 
         nf = min(len(frames) - 1, n_frames - 1)
-        flows = np.empty((nf, 2, cfg.frame_height, cfg.frame_width), dtype=np.uint8)
+        flows = np.empty((nf, 2, cfg.flow_height, cfg.flow_width), dtype=np.uint8)
         with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as pool:
             futures = [
                 pool.submit(_compute_flow_pair,
                             (i, frames[i], frames[i + 1],
-                             cfg.frame_width, cfg.frame_height, cfg.flow_norm))
+                             cfg.flow_width, cfg.flow_height, cfg.flow_norm))
                 for i in range(nf)
             ]
             for fut in as_completed(futures):

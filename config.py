@@ -10,6 +10,8 @@ class Config:
     native_height: int = 224
     frame_width: int = 160
     frame_height: int = 120
+    flow_width: int = 160
+    flow_height: int = 120
     flow_norm: float = 20.0
 
     # Native-resolution HUD ROIs: (x, y, width, height). These are defaults
@@ -69,7 +71,7 @@ class Config:
     bc_epochs: int = 100
     use_amp: bool = True
     amp_dtype: str = "float16"
-    compile_model: bool = False
+    compile_model: bool = True
 
     # --- Match-context profiling ---
     # A 64-d GRU that the minGRU reads every frame and updates at chunk
