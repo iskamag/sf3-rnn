@@ -4,9 +4,10 @@
 -- Output format (one line per frame):
 --   <frame> <p1_bits> <p2_bits> <p1_hp> <p2_hp> <p1_stun> <p2_stun> <timer> <p1_wins> <p2_wins>
 
-local out = io.open("input_log.txt", "w")
+local out_path = os.getenv("ST_RNN_INPUT_LOG") or "input_log.txt"
+local out = io.open(out_path, "w")
 if not out then
-    print("ERROR: cannot open input_log.txt")
+    print("ERROR: cannot open " .. out_path)
     os.exit(1)
 end
 
@@ -14,14 +15,17 @@ end
 local P1_HEALTH = 0x2068D0B
 local P2_HEALTH = 0x20691A3
 local ROUND_TIMER = 0x2011377     -- frames remaining (0-99)
-local P1_WINS    = 0x206A2DB     -- rounds won  (FIXME: untested, always reads 0)
-local P2_WINS    = 0x206A2DD     -- rounds won  (FIXME: untested, always reads 0)
 local P1_COMBO   = 0x20696C5     -- P1 combo counter (non-zero → P2 in stun)
 local P2_COMBO   = 0x206961D     -- P2 combo counter (non-zero → P1 in stun)
 
 local MAX_HEALTH = 0xA0  -- 160
+local KO_THRESHOLD = 0.01
+local FULL_HEALTH_THRESHOLD = 0.98
 
 local frame = 0
+local p1_wins = 0
+local p2_wins = 0
+local round_over = false
 
 local function read_bits(prefix)
     -- CPS3/SF3 uses per-game button names, not generic "P1 Button N" (cf. fbneo-training-mode)
@@ -41,6 +45,54 @@ local function read_bits(prefix)
     return bits
 end
 
+local function is_round_start(p1_hp, p2_hp)
+    return p1_hp >= FULL_HEALTH_THRESHOLD and p2_hp >= FULL_HEALTH_THRESHOLD
+end
+
+local function round_winner(p1_hp, p2_hp, timer)
+    if p1_hp <= KO_THRESHOLD and p2_hp > KO_THRESHOLD then
+        return 2
+    end
+    if p2_hp <= KO_THRESHOLD and p1_hp > KO_THRESHOLD then
+        return 1
+    end
+    if timer == 0 then
+        if p1_hp > p2_hp + KO_THRESHOLD then
+            return 1
+        end
+        if p2_hp > p1_hp + KO_THRESHOLD then
+            return 2
+        end
+        return -1
+    end
+    return 0
+end
+
+local function update_round_wins(p1_hp, p2_hp, timer)
+    if is_round_start(p1_hp, p2_hp) then
+        if p1_wins >= 2 or p2_wins >= 2 then
+            p1_wins = 0
+            p2_wins = 0
+        end
+        round_over = false
+    end
+
+    if round_over then
+        return
+    end
+
+    local winner = round_winner(p1_hp, p2_hp, timer)
+    if winner == 1 then
+        p1_wins = math.min(p1_wins + 1, 2)
+        round_over = true
+    elseif winner == 2 then
+        p2_wins = math.min(p2_wins + 1, 2)
+        round_over = true
+    elseif winner == -1 then
+        round_over = true
+    end
+end
+
 local function log_frame()
     local p1_bits = read_bits("P1")
     local p2_bits = read_bits("P2")
@@ -53,11 +105,11 @@ local function log_frame()
     -- P2 in stun = P1's combo counter is non-zero (P1 is hitting P2)
     local p2_stun = memory.readbyte(P1_COMBO) ~= 0 and 1 or 0
     local timer   = memory.readbyte(ROUND_TIMER)
-    local p1_w    = memory.readbyte(P1_WINS)
-    local p2_w    = memory.readbyte(P2_WINS)
+
+    update_round_wins(p1_hp, p2_hp, timer)
 
     out:write(string.format("%d %d %d %.3f %.3f %d %d %d %d %d\n",
-        frame, p1_bits, p2_bits, p1_hp, p2_hp, p1_stun, p2_stun, timer, p1_w, p2_w))
+        frame, p1_bits, p2_bits, p1_hp, p2_hp, p1_stun, p2_stun, timer, p1_wins, p2_wins))
     out:flush()
     frame = frame + 1
 end

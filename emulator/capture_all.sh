@@ -2,8 +2,9 @@
 # capture_all.sh — parallel replay capture from a list file
 #
 # Reads replay IDs from a file (one per line, # comments allowed) and fans
-# them out across N parallel capture workers.  Each worker gets its own
-# wine prefix, audio sink, and temp directory.
+# them out across N parallel capture workers. Note that FBNeo may still fall
+# back to a shared `input_log.txt`, so single-worker capture is the safest
+# option if logs collide.
 #
 # Usage:
 #   ./emulator/capture_all.sh replay_ids.txt [workers] [game]
