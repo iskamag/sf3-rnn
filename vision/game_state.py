@@ -191,18 +191,6 @@ def _find_template_positions(audio: "np.ndarray",
     return np.array(hits, dtype=np.int64)
 
 
-def _find_match_end_frames(p1w: "np.ndarray",
-                           p2w: "np.ndarray",
-                           match_wins: int = 2,
-                           ) -> "np.ndarray":
-    """Return exclusive end frames where a player reaches *match_wins*."""
-    ends = []
-    for i in range(1, len(p1w)):
-        prev_best = max(int(p1w[i - 1]), int(p2w[i - 1]))
-        curr_best = max(int(p1w[i]), int(p2w[i]))
-        if curr_best >= match_wins and curr_best > prev_best:
-            ends.append(i + 1)
-    return np.array(ends, dtype=np.int64)
 
 
 def audio_match_signal(audio_path: "Path",

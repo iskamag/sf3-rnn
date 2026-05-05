@@ -216,6 +216,18 @@ _terminate_emulator_processes() {
     CURRENT_EMU_PID=""
 }
 
+# Kill winedevice.exe processes belonging to *this* prefix only.
+# Parallel-safe: other workers have their own WINEPREFIX.
+_kill_own_winedevice() {
+    for wpid in $(pgrep -f winedevice.exe 2>/dev/null || true); do
+        local penv
+        penv=$(tr '\0' '\n' < "/proc/$wpid/environ" 2>/dev/null | grep "^WINEPREFIX=" | head -n 1)
+        if [ "$penv" = "WINEPREFIX=$WINE_PFX" ]; then
+            kill "$wpid" 2>/dev/null || true
+        fi
+    done
+}
+
 # ---- Find a PipeWire node (video source or new audio stream) ----
 _find_video_node() {
     local pid="$1"
@@ -444,6 +456,7 @@ capture_one() {
 
     _stop_recorders
     _terminate_emulator_processes
+    _kill_own_winedevice
 
     # Save input log.
     _copy_input_log
@@ -457,6 +470,7 @@ _cleanup() {
     echo "Cleaning up …"
     _copy_input_log
     _terminate_emulator_processes
+    _kill_own_winedevice
     rm -f "$EMU_LOG_PATH"
     exec {_lock_fd}>&- 2>/dev/null || true
     rm -rf "$TMPDIR"
