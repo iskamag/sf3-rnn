@@ -184,14 +184,20 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
                      hp1: np.ndarray, hp2: np.ndarray,
                      stun1: np.ndarray, stun2: np.ndarray,
                      audio_feats: np.ndarray, start: int, end: int,
-                     cfg: Config):
-    f_start = start
-    f_end = min(flows_u8.shape[0], end - 1)
+                     cfg: Config, input_offset: int = 0):
+    # start/end are in input-log frame space.
+    # flows and audio_feats may be shorter than the input log (offset frames).
+    v_start = start - input_offset
+    v_end = end - input_offset
+    f_start = max(0, v_start)
+    f_end = min(flows_u8.shape[0], v_end - 1)
+    if f_end <= f_start:
+        return None  # flow data doesn't cover this match segment
     out = output_dir / f"{stem}_match{idx:03d}"
     out.mkdir(parents=True, exist_ok=True)
 
     np.save(out / "flow_u8.npy", flows_u8[f_start:f_end])
-    np.save(out / "audio_f16.npy", audio_feats[start:end].astype(np.float16))
+    np.save(out / "audio_f16.npy", audio_feats[v_start:v_end].astype(np.float16))
     np.save(out / "movement_u8.npy", p1_mov[start:end].astype(np.uint8))
     np.save(out / "buttons_u8.npy", p1_btn[start:end].astype(np.uint8))
     np.save(out / "p2_movement_u8.npy", p2_mov[start:end].astype(np.uint8))
@@ -204,9 +210,9 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
         "format": "st-rnn-shard-v1",
         "source_capture": stem,
         "match_index": idx,
-        "start_frame": start,
-        "end_frame": end,
-        "num_frames": end - start,
+        "start_frame": v_start,
+        "end_frame": v_end,
+        "num_frames": v_end - v_start,
         "num_flows": f_end - f_start,
         "fps": cfg.fps,
         "frame_width": cfg.frame_width,
@@ -243,6 +249,8 @@ def main():
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     p.add_argument("--match-template", type=Path, default=Path("hmm_16k_1s.wav"),
                    help="Audio cue template used to detect match starts")
+    p.add_argument("--corr-threshold", type=float, default=0.6,
+                   help="Normalised cross-correlation threshold for template matching")
     args = p.parse_args()
 
     cfg = Config()
@@ -323,11 +331,15 @@ def main():
             tqdm.write(f"  [skip] {d.name}: missing template {template}")
             continue
 
+        # The input logger starts before video/audio capture — compensate.
+        input_offset = max(0, n_frames - len(frames))
         boundaries = audio_match_signal(audio, template,
                                         p1w, p2w,
                                         cfg.audio_sample_rate, cfg.fps,
                                         start_offset_frames=cfg.match_start_offset_frames,
-                                        min_match_len=cfg.match_min_len)
+                                        input_offset_frames=input_offset,
+                                        min_match_len=cfg.match_min_len,
+                                        corr_threshold=args.corr_threshold)
         if not boundaries:
             tqdm.write(f"  [skip] {d.name}: no audio/log-derived match boundaries")
             continue
@@ -336,7 +348,7 @@ def main():
             save_match_shard(args.output_dir, d.name, mi,
                              flows, p1_mov, p1_btn, p2_mov, p2_btn,
                              hp1_raw, hp2_raw, stun1, stun2, audio_feats,
-                             start, end, cfg)
+                             start, end, cfg, input_offset=input_offset)
         total_matches += len(boundaries)
         tqdm.write(f"  {d.name} → {len(boundaries)} matches  ({n_frames} f)")
 

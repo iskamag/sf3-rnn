@@ -130,49 +130,77 @@ def has_health_bar(frame: np.ndarray, roi: dict,
 # Audio-based match detection — cross-correlates a template .wav against
 # captured audio to find match boundaries without any video or health logic.
 # ---------------------------------------------------------------------------
-_SIGNATURE_LEN = 256  # first N samples used as quick-reject prefix
 
 
 def _find_template_positions(audio: "np.ndarray",
                              template: "np.ndarray",
+                             corr_threshold: float = 0.6,
                              ) -> "np.ndarray":
-    """Return sorted sample offsets where *template* appears verbatim in *audio*.
+    """Return sorted sample offsets where *template* cross-correlates above threshold.
 
-    Uses a short signature prefix for O(n) early rejection; only runs full
-    comparison at candidate positions.
+    Uses FFT-based normalised cross-correlation (O(N log N)), then suppresses
+    overlapping detections (keeps only the best within a template-length window).
     """
-    sig_len = min(_SIGNATURE_LEN, len(template))
-    sig = template[:sig_len]
     tlen = len(template)
     alen = len(audio)
-    hits = []
+    if tlen == 0 or alen < tlen:
+        return np.array([], dtype=np.int64)
 
+    # Centre both signals (DC removal).
+    ta = template.astype(np.float64) - 128.0
+    aa = audio.astype(np.float64) - 128.0
+
+    # FFT-based cross-correlation.
+    n_fft = int(2 ** np.ceil(np.log2(alen + tlen - 1)))
+    FA = np.fft.rfft(aa, n=n_fft)
+    FT = np.fft.rfft(ta[::-1], n=n_fft)
+    corr_raw = np.fft.irfft(FA * FT, n=n_fft)
+
+    # Trim to valid range: corr_raw[k] corresponds to shift = k - (tlen - 1).
+    valid = corr_raw[tlen - 1:alen]
+
+    # Normalise by local audio energy (window = template length).
+    a2 = aa * aa
+    cum_a2 = np.concatenate([[0.0], np.cumsum(a2)])
+    window_sums = np.empty(alen - tlen + 1, dtype=np.float64)
+    for i in range(len(window_sums)):
+        window_sums[i] = cum_a2[i + tlen] - cum_a2[i]
+    local_norm = np.sqrt(np.maximum(window_sums, 1e-10))
+    template_norm = np.linalg.norm(ta)
+    denom = template_norm * local_norm
+    corr = valid / np.maximum(denom, 1e-10)
+
+    # Find peaks above threshold.
+    above = corr > corr_threshold
+    if not above.any():
+        return np.array([], dtype=np.int64)
+
+    # Non-maximum suppression: slide a template-length window, keep best peak.
+    hits = []
     i = 0
-    limit = alen - tlen + 1
-    while i < limit:
-        # Fast scan: skip until signature prefix matches.
-        if not np.array_equal(audio[i:i + sig_len], sig):
+    while i < len(corr):
+        if not above[i]:
             i += 1
             continue
-        # Full comparison at candidate position.
-        if np.array_equal(audio[i:i + tlen], template):
-            hits.append(i)
-            i += tlen  # skip past the match to avoid overlapping hits
-        else:
-            i += 1
+        end = min(i + tlen, len(corr))
+        window_corr = corr[i:end]
+        peak = i + int(np.argmax(window_corr))
+        if corr[peak] > corr_threshold:
+            hits.append(peak)
+        i = peak + tlen
     return np.array(hits, dtype=np.int64)
 
 
 def _find_match_end_frames(p1w: "np.ndarray",
                            p2w: "np.ndarray",
-                           match_wins: int = 2,
                            ) -> "np.ndarray":
-    """Return exclusive end frames for matches once a player reaches match point."""
+    """Return exclusive end frame for each match — the frame where a round-win
+    counter increments to its final value (i.e. the match-point transition).
+    Works regardless of whether win counters are per-round (0→1→2 per match)
+    or per-match (0→1 per match) because it only looks for increments."""
     ends = []
     for i in range(1, len(p1w)):
-        prev_best = max(int(p1w[i - 1]), int(p2w[i - 1]))
-        curr_best = max(int(p1w[i]), int(p2w[i]))
-        if curr_best >= match_wins and curr_best > prev_best:
+        if int(p1w[i]) > int(p1w[i - 1]) or int(p2w[i]) > int(p2w[i - 1]):
             ends.append(i + 1)
     return np.array(ends, dtype=np.int64)
 
@@ -184,15 +212,18 @@ def audio_match_signal(audio_path: "Path",
                        target_sr: int = 16000,
                        fps: int = 60,
                        start_offset_frames: int = 0,
+                       input_offset_frames: int = 0,
                        min_match_len: int = 120,
-                       match_wins: int = 2,
+                       corr_threshold: float = 0.6,
                        ) -> "list[tuple[int, int]]":
-    """Return (start, end) frame pairs.
+    """Return (start, end) frame pairs in *input-log* frame space.
 
     Match starts come from audio template peaks plus a fixed frame offset;
-    match ends come from the first frame where either player reaches the
-    final round-win count.
-    Unmatched starts are dropped.
+    match ends come from win-counter increments in the input log.
+
+    *input_offset_frames* accounts for the video/audio recording starting
+    later than the input log — it is added to audio-derived starts so they
+    align with input-log frame indices.
     """
     import wave
 
@@ -216,10 +247,12 @@ def audio_match_signal(audio_path: "Path",
     audio = _load_u8(audio_path)
 
     spf = target_sr / fps
-    offsets = _find_template_positions(audio, template)
+    offsets = _find_template_positions(audio, template, corr_threshold=corr_threshold)
     starts = np.rint(offsets / spf).astype(int)
     if start_offset_frames:
         starts = starts + int(start_offset_frames)
+    # Align audio-derived starts with input-log frame indices.
+    starts = starts + int(input_offset_frames)
     frame_limit = None
     if p1w is not None:
         frame_limit = len(p1w)
@@ -231,7 +264,7 @@ def audio_match_signal(audio_path: "Path",
     if p1w is None or p2w is None:
         return []
 
-    ends = _find_match_end_frames(p1w, p2w, match_wins=match_wins)
+    ends = _find_match_end_frames(p1w, p2w)
 
     # Pair each start with the next match-completing win transition.
     boundaries: list[tuple[int, int]] = []

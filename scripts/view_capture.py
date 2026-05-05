@@ -8,11 +8,13 @@ video with a coloured overlay showing which frames belong to which match.
 Usage:
     python scripts/view_capture.py data/captures/1777895668498-5828
 
-Keys:
-    Left/Right   — step one frame
+Controls:
+    a / d        — step one frame
+    w / s        — ±60 frames
+    [ / ]        — previous / next match
     Space        — play / pause
-    Up/Down      — ±60 frames
     m            — toggle optical-flow overlay
+    Scrub bar    — drag to seek
     q / Esc      — quit
 """
 
@@ -67,7 +69,8 @@ def boundaries_to_mask(bounds: list[tuple[int, int]], n: int) -> np.ndarray:
 
 
 def draw_overlay(frame: np.ndarray, idx: int, match_idx: int,
-                 total_frames: int, fps: int, playing: bool,
+                 total_frames: int, total_matches: int,
+                 fps: int, playing: bool,
                  show_flow: bool, flow_frame: np.ndarray | None) -> np.ndarray:
     H, W = 120, 160
     out = np.zeros((H + 28, W, 3), dtype=np.uint8)
@@ -95,7 +98,10 @@ def draw_overlay(frame: np.ndarray, idx: int, match_idx: int,
 
     # Info bar.
     sec = idx / fps
-    status = f"match {match_idx}" if match_idx >= 0 else "menu / select"
+    if match_idx >= 0:
+        status = f"match {match_idx}/{total_matches - 1}"
+    else:
+        status = "menu / select"
     text = f"frame {idx}/{total_frames}  {sec:.1f}s  [{status}]"
     if playing:
         text += "  ▶"
@@ -109,6 +115,8 @@ def main():
     p.add_argument("capture_dir", type=Path)
     p.add_argument("--match-template", type=Path, default=Path("hmm_16k_1s.wav"),
                    help="Audio cue template used to detect match starts")
+    p.add_argument("--corr-threshold", type=float, default=0.6,
+                   help="Normalised cross-correlation threshold for template matching")
     args = p.parse_args()
 
     cap = args.capture_dir
@@ -145,11 +153,17 @@ def main():
         print(f"Missing template: {template}")
         return
 
+    # The input logger starts before video/audio capture — compensate.
+    input_offset = max(0, len(p1w) - n)
     bounds = audio_match_signal(audio, template,
-                                p1w[:n], p2w[:n],
+                                p1w, p2w,
                                 cfg.audio_sample_rate, cfg.fps,
                                 start_offset_frames=cfg.match_start_offset_frames,
-                                min_match_len=cfg.match_min_len)
+                                input_offset_frames=input_offset,
+                                min_match_len=cfg.match_min_len,
+                                corr_threshold=args.corr_threshold)
+    # Convert from input-log frame space to video frame space.
+    bounds = [(max(0, s - input_offset), max(0, e - input_offset)) for (s, e) in bounds]
     match_mask = boundaries_to_mask(bounds, n)
 
     print(f"Frames: {n}  ({n / cfg.fps:.1f}s)")
@@ -159,7 +173,11 @@ def main():
 
     cv2.namedWindow("capture", cv2.WINDOW_AUTOSIZE)
 
+    def _noop(_val):
+        pass
+
     idx = bounds[0][0] if bounds else 0
+    cv2.createTrackbar("frame", "capture", idx, n - 1, _noop)
     playing = False
     show_flow = False
     flow_cache: tuple[int, np.ndarray | None] = (-1, None)
@@ -175,35 +193,59 @@ def main():
                 flow_cache = (idx, f)
             flow = flow_cache[1]
 
-        out = draw_overlay(frame, idx, match_idx, n, cfg.fps, playing, show_flow, flow)
+        out = draw_overlay(frame, idx, match_idx, n, len(bounds), cfg.fps, playing, show_flow, flow)
         cv2.imshow("capture", out)
 
-        delay = 16 if playing else 0   # ~60 fps playback
-        key = cv2.waitKey(delay) & 0xFF
+        # Use a short poll so trackbar drags are picked up immediately.
+        delay = 16 if playing else 5
+        key_raw = cv2.waitKey(delay)
 
-        if key == ord("q") or key == 27:
-            break
-        elif key == ord(" "):
-            playing = not playing
-        elif key == 81:                 # left arrow
-            idx = max(0, idx - 1)
+        tb_pos = cv2.getTrackbarPos("frame", "capture")
+        if tb_pos != idx:
+            idx = tb_pos
             playing = False
-        elif key == 83:                 # right arrow
-            idx = min(n - 1, idx + 1)
-            playing = False
-        elif key == 82:                 # up arrow
-            idx = max(0, idx - 60)
-            playing = False
-        elif key == 84:                 # down arrow
-            idx = min(n - 1, idx + 60)
-            playing = False
-        elif key == ord("m"):
-            show_flow = not show_flow
-            flow_cache = (-1, None)
-        elif playing:
-            idx = min(n - 1, idx + 1)
-            if idx >= n - 1:
+
+        if key_raw == -1:
+            if playing:
+                idx = min(n - 1, idx + 1)
+                if idx >= n - 1:
+                    playing = False
+        else:
+            key = key_raw & 0xFF
+            if key == ord("q") or key == 27:
+                break
+            elif key == ord(" "):
+                playing = not playing
+            elif key == ord("a"):
+                idx = max(0, idx - 1)
                 playing = False
+            elif key == ord("d"):
+                idx = min(n - 1, idx + 1)
+                playing = False
+            elif key == ord("w"):
+                idx = max(0, idx - 60)
+                playing = False
+            elif key == ord("s"):
+                idx = min(n - 1, idx + 60)
+                playing = False
+            elif key == ord("m"):
+                show_flow = not show_flow
+                flow_cache = (-1, None)
+            elif key == ord("[") and bounds:
+                cur_match = match_mask[idx]
+                target = cur_match - 1 if cur_match >= 0 else len(bounds) - 1
+                if 0 <= target < len(bounds):
+                    idx = bounds[target][0]
+                    playing = False
+            elif key == ord("]") and bounds:
+                cur_match = match_mask[idx]
+                target = cur_match + 1 if cur_match < len(bounds) - 1 else 0
+                if 0 <= target < len(bounds):
+                    idx = bounds[target][0]
+                    playing = False
+
+        if tb_pos != idx:
+            cv2.setTrackbarPos("frame", "capture", idx)
 
     cv2.destroyAllWindows()
 
