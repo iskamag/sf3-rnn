@@ -28,7 +28,7 @@ from data.shard import FLOW_MAX, FLOW_MIN, quantize_flow, write_json
 from model.action_space import bitfield_to_action
 from vision.optical_flow import compute_flow
 from vision.audio_features import _dct_batch, _get_mel_filterbank
-from vision.game_state import find_match_boundaries
+from vision.game_state import audio_match_signal
 
 
 # ---------------------------------------------------------------------------
@@ -241,9 +241,12 @@ def main():
     p = argparse.ArgumentParser(description="Convert captures to training shards")
     p.add_argument("--capture-dir", type=Path, default=Path("data/captures"))
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
+    p.add_argument("--match-template", type=Path, default=Path("hmm_16k_1s.wav"),
+                   help="Audio cue template used to detect match starts")
     args = p.parse_args()
 
     cfg = Config()
+    project_root = Path(__file__).resolve().parent.parent
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     all_captures = {d.name for d in args.capture_dir.iterdir() if d.is_dir()}
@@ -309,15 +312,24 @@ def main():
         else:
             audio_feats = np.zeros((n_frames, cfg.audio_feat_dim), dtype=np.float32)
 
-        # ---- match boundaries ----
-        signal = (hp1_raw > 0.05) & (hp2_raw > 0.05)
-        boundaries = find_match_boundaries(signal)
+        # ---- match boundaries (audio start template + logged match ends) ----
+        template = args.match_template
+        if not template.is_absolute():
+            template = project_root / template
+        if not audio.exists():
+            tqdm.write(f"  [skip] {d.name}: no audio.wav for template-based match starts")
+            continue
+        if not template.exists():
+            tqdm.write(f"  [skip] {d.name}: missing template {template}")
+            continue
+
+        boundaries = audio_match_signal(audio, template,
+                                        p1w, p2w,
+                                        cfg.audio_sample_rate, cfg.fps,
+                                        start_offset_frames=cfg.match_start_offset_frames,
+                                        min_match_len=cfg.match_min_len)
         if not boundaries:
-            out = save_match_shard(args.output_dir, d.name, 0, flows, p1_mov, p1_btn,
-                                   p2_mov, p2_btn, hp1_raw, hp2_raw, stun1, stun2,
-                                   audio_feats, 0, n_frames, cfg)
-            tqdm.write(f"  {out.name}  ({n_frames} f)")
-            total_matches += 1
+            tqdm.write(f"  [skip] {d.name}: no audio/log-derived match boundaries")
             continue
 
         for mi, (start, end) in enumerate(boundaries):

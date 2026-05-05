@@ -36,14 +36,20 @@ def compute_step_reward(prev: GameState,
     if p1:
         hp_self, hp_opp = curr.p1_health, curr.p2_health
         hp_self_prev, hp_opp_prev = prev.p1_health, prev.p2_health
+        wins_self, wins_self_prev = curr.p1_wins, prev.p1_wins
     else:
         hp_self, hp_opp = curr.p2_health, curr.p1_health
         hp_self_prev, hp_opp_prev = prev.p2_health, prev.p1_health
+        wins_self, wins_self_prev = curr.p2_wins, prev.p2_wins
 
     dmg_dealt = max(0.0, hp_opp_prev - hp_opp)
     dmg_taken = max(0.0, hp_self_prev - hp_self)
+    rounds_won = max(0, wins_self - wins_self_prev)
+    match_won = int(wins_self >= 2 and wins_self_prev < 2)
 
     reward = cfg.health_delta * (dmg_dealt - dmg_taken)
+    reward += cfg.round_win * rounds_won
+    reward += cfg.match_win * match_won
     reward += cfg.idle if not any_button else 0.0
 
     return reward

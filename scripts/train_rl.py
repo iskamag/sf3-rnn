@@ -23,7 +23,7 @@ from model.audio_buffer import AudioBuffer
 from model.output_buffer import OutputDelayBuffer
 from train.ppo import PPOTrainer
 from train.reward import compute_step_reward, RewardConfig
-from vision.game_state import extract_game_state, GameState
+from vision.game_state import extract_game_state, GameState, WinTracker
 from env.sf3_env import SF3Env, MssScreenEnv
 from env.audio_capture import AudioCapture, AudioCaptureStub
 
@@ -57,6 +57,7 @@ def collect_episode(env: SF3Env,
     sensory_buf.add_frame(frame)
     total_reward = 0.0
     prev_state: GameState | None = None
+    win_tracker = WinTracker()
 
     roi = {
         "p1_health": cfg.p1_health_roi,
@@ -129,7 +130,7 @@ def collect_episode(env: SF3Env,
         frame, _, done, info = env.step(direction, buttons)
 
         # ---- Reward from health delta ----
-        curr_state = extract_game_state(frame, roi)
+        curr_state = win_tracker.update(extract_game_state(frame, roi))
         reward = 0.0
         if prev_state is not None and delayed is not None:
             reward = compute_step_reward(

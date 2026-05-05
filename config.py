@@ -35,6 +35,10 @@ class Config:
     audio_lag_frames: int = 3         # audio input delay  (faster pathway)
     motor_lag_frames: int = 4         # output delay
 
+    # --- Match boundary detection ---
+    match_start_offset_frames: int = 20  # cue match starts slightly before gameplay; skip ahead
+    match_min_len: int = 120          # ignore very short audio/log match segments
+
     @property
     def total_delay_frames(self) -> int:
         return self.sensory_lag_frames + self.motor_lag_frames

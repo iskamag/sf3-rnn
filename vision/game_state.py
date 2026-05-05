@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 
 
 @dataclass(slots=True)
@@ -28,6 +28,46 @@ class GameState:
             self.round_timer / 99.0,
             self.p1_wins / 2.0, self.p2_wins / 2.0,
         ], dtype=torch.float32)
+
+
+@dataclass(slots=True)
+class WinTracker:
+    """Track round wins from observable state transitions.
+
+    Live PPO does not have the replay logger's memory-backed metadata, so we
+    derive round wins from KO / round-reset transitions and carry them forward
+    in GameState.
+    """
+
+    p1_wins: int = 0
+    p2_wins: int = 0
+    round_over: bool = False
+    ko_threshold: float = 0.01
+    full_health_threshold: float = 0.98
+    match_wins: int = 2
+
+    def reset(self):
+        self.p1_wins = 0
+        self.p2_wins = 0
+        self.round_over = False
+
+    def update(self, state: "GameState") -> "GameState":
+        if (state.p1_health >= self.full_health_threshold
+                and state.p2_health >= self.full_health_threshold):
+            if self.p1_wins >= self.match_wins or self.p2_wins >= self.match_wins:
+                self.p1_wins = 0
+                self.p2_wins = 0
+            self.round_over = False
+
+        if not self.round_over:
+            if state.p1_health <= self.ko_threshold and state.p2_health > self.ko_threshold:
+                self.p2_wins = min(self.p2_wins + 1, self.match_wins)
+                self.round_over = True
+            elif state.p2_health <= self.ko_threshold and state.p1_health > self.ko_threshold:
+                self.p1_wins = min(self.p1_wins + 1, self.match_wins)
+                self.round_over = True
+
+        return replace(state, p1_wins=self.p1_wins, p2_wins=self.p2_wins)
 
 
 # ---------------------------------------------------------------------------
@@ -86,81 +126,126 @@ def has_health_bar(frame: np.ndarray, roi: dict,
     return (p1 > threshold) and (p2 > threshold)
 
 
-def find_match_boundaries(
-    health_signal: "np.ndarray",           # (T,) bool — True = health visible
-    min_round_gap: int = 30,               # frames of health-loss that are just a round reset
-    min_menu_gap: int = 180,               # frames of health-loss that signal a menu
-    min_match_len: int = 120,              # ignore very short segments
-) -> "list[tuple[int, int]]":
-    """Split a boolean health signal into (start, end) match windows.
+# ---------------------------------------------------------------------------
+# Audio-based match detection — cross-correlates a template .wav against
+# captured audio to find match boundaries without any video or health logic.
+# ---------------------------------------------------------------------------
+_SIGNATURE_LEN = 256  # first N samples used as quick-reject prefix
 
-    Short health-absent gaps (< min_round_gap) are absorbed into the
-    current match.  Long gaps (>= min_menu_gap) signal character select
-    or a return to the main menu, splitting the replay into separate
-    matches.
+
+def _find_template_positions(audio: "np.ndarray",
+                             template: "np.ndarray",
+                             ) -> "np.ndarray":
+    """Return sorted sample offsets where *template* appears verbatim in *audio*.
+
+    Uses a short signature prefix for O(n) early rejection; only runs full
+    comparison at candidate positions.
     """
-    T = len(health_signal)
-    if T == 0:
+    sig_len = min(_SIGNATURE_LEN, len(template))
+    sig = template[:sig_len]
+    tlen = len(template)
+    alen = len(audio)
+    hits = []
+
+    i = 0
+    limit = alen - tlen + 1
+    while i < limit:
+        # Fast scan: skip until signature prefix matches.
+        if not np.array_equal(audio[i:i + sig_len], sig):
+            i += 1
+            continue
+        # Full comparison at candidate position.
+        if np.array_equal(audio[i:i + tlen], template):
+            hits.append(i)
+            i += tlen  # skip past the match to avoid overlapping hits
+        else:
+            i += 1
+    return np.array(hits, dtype=np.int64)
+
+
+def _find_match_end_frames(p1w: "np.ndarray",
+                           p2w: "np.ndarray",
+                           match_wins: int = 2,
+                           ) -> "np.ndarray":
+    """Return exclusive end frames for matches once a player reaches match point."""
+    ends = []
+    for i in range(1, len(p1w)):
+        prev_best = max(int(p1w[i - 1]), int(p2w[i - 1]))
+        curr_best = max(int(p1w[i]), int(p2w[i]))
+        if curr_best >= match_wins and curr_best > prev_best:
+            ends.append(i + 1)
+    return np.array(ends, dtype=np.int64)
+
+
+def audio_match_signal(audio_path: "Path",
+                       template_path: "Path",
+                       p1w: "np.ndarray | None" = None,
+                       p2w: "np.ndarray | None" = None,
+                       target_sr: int = 16000,
+                       fps: int = 60,
+                       start_offset_frames: int = 0,
+                       min_match_len: int = 120,
+                       match_wins: int = 2,
+                       ) -> "list[tuple[int, int]]":
+    """Return (start, end) frame pairs.
+
+    Match starts come from audio template peaks plus a fixed frame offset;
+    match ends come from the first frame where either player reaches the
+    final round-win count.
+    Unmatched starts are dropped.
+    """
+    import wave
+
+    def _load_u8(path: "Path") -> "np.ndarray":
+        with wave.open(str(path), "rb") as wf:
+            sr = wf.getframerate()
+            raw = wf.readframes(wf.getnframes())
+            ch = wf.getnchannels()
+        samples = np.frombuffer(raw, dtype=np.uint8)
+        if ch == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1).astype(np.uint8)
+        if sr != target_sr:
+            ratio = target_sr / sr
+            n_out = int(len(samples) * ratio)
+            samples = np.interp(np.linspace(0, len(samples) - 1, n_out),
+                                np.arange(len(samples)), samples)
+            samples = np.clip(np.rint(samples), 0, 255).astype(np.uint8)
+        return samples
+
+    template = _load_u8(template_path)
+    audio = _load_u8(audio_path)
+
+    spf = target_sr / fps
+    offsets = _find_template_positions(audio, template)
+    starts = np.rint(offsets / spf).astype(int)
+    if start_offset_frames:
+        starts = starts + int(start_offset_frames)
+    frame_limit = None
+    if p1w is not None:
+        frame_limit = len(p1w)
+    elif p2w is not None:
+        frame_limit = len(p2w)
+    if frame_limit is not None:
+        starts = starts[(starts >= 0) & (starts < frame_limit)]
+
+    if p1w is None or p2w is None:
         return []
 
-    # ---- greedy forward scan ----
-    matches: list[tuple[int, int]] = []
-    i = 0
-    while i < T:
-        # fast-forward to health
-        while i < T and not health_signal[i]:
-            i += 1
-        if i >= T:
+    ends = _find_match_end_frames(p1w, p2w, match_wins=match_wins)
+
+    # Pair each start with the next match-completing win transition.
+    boundaries: list[tuple[int, int]] = []
+    ei = 0
+    for s in starts:
+        while ei < len(ends) and ends[ei] <= s:
+            ei += 1
+        if ei >= len(ends):
             break
-        start = i
-
-        # consume until we hit a long gap
-        gap_counter = 0
-        while i < T:
-            if health_signal[i]:
-                gap_counter = 0
-                i += 1
-            else:
-                gap_counter += 1
-                i += 1
-                if gap_counter >= min_menu_gap:
-                    break
-
-        end = i - gap_counter
-        if end - start >= min_match_len:
-            matches.append((start, end))
-
-        # skip the remaining gap
-        while i < T and not health_signal[i]:
-            i += 1
-
-    return matches
-
-
-def health_signal_from_array(
-    health: "np.ndarray",                  # (T,) float, health_p1 or health_p2
-    threshold: float = 0.08,
-) -> "np.ndarray":                         # (T,) bool
-    """Convert a health trace into a boolean gameplay signal."""
-    return health > threshold
-
-
-def health_signal_from_inputs(
-    buttons: "np.ndarray",                 # (T, 6) float
-    activity_window: int = 60,
-    threshold: float = 0.01,
-) -> "np.ndarray":                         # (T,) bool
-    """Approximate gameplay frames from button activity.
-
-    Fallback when screen captures are unavailable.  Menus have sparse
-    directional inputs; gameplay has frequent button presses.
-    """
-    T = len(buttons)
-    # rolling sum of button presses within window
-    kernel = np.ones(activity_window)
-    active = buttons.sum(axis=1)                     # (T,)  total buttons pressed per frame
-    convolved = np.convolve(active, kernel, mode="same")
-    return convolved > threshold
+        e = int(ends[ei])
+        ei += 1
+        if e - s >= min_match_len:
+            boundaries.append((int(s), e))
+    return boundaries
 
 
 def extract_game_state(frame: np.ndarray,                     # (H, W, 3) BGR
