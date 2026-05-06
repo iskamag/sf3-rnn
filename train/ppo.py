@@ -88,6 +88,10 @@ class PPOTrainer:
         self.total_steps = 0
         self.episode = 0
 
+        self._rollout_obs = None
+        self._rollout_motor_buf: Optional[OutputDelayBuffer] = None
+        self._rollout_traj: list[Transition] = []
+
         self.use_amp = cfg.use_amp and self.device.type == "cuda"
         self.amp_dtype = torch.float16 if cfg.amp_dtype == "float16" else torch.bfloat16
 
@@ -124,11 +128,15 @@ class PPOTrainer:
     @torch.no_grad()
     def collect_rollouts(self, num_steps: int) -> list[list[Transition]]:
         trajectories: list[list[Transition]] = []
-        cur_traj: list[Transition] = []
+        cur_traj = self._rollout_traj
 
-        obs, _ = self.env.reset()
-        self.agent.reset()
-        motor_buf = OutputDelayBuffer(motor_lag=self.cfg.motor_lag_frames)
+        if self._rollout_obs is None or self._rollout_motor_buf is None:
+            obs, _ = self.env.reset()
+            self.agent.reset()
+            motor_buf = OutputDelayBuffer(motor_lag=self.cfg.motor_lag_frames)
+        else:
+            obs = self._rollout_obs
+            motor_buf = self._rollout_motor_buf
 
         stored = 0
         collected = 0
@@ -172,15 +180,17 @@ class PPOTrainer:
                 stored += 1
 
             if done:
-                trajectories.append(cur_traj)
+                if cur_traj:
+                    trajectories.append(cur_traj)
                 cur_traj = []
                 self.episode += 1
                 obs, _ = self.env.reset()
                 self.agent.reset()
                 motor_buf = OutputDelayBuffer(motor_lag=self.cfg.motor_lag_frames)
 
-        if cur_traj:
-            trajectories.append(cur_traj)
+        self._rollout_obs = obs
+        self._rollout_motor_buf = motor_buf
+        self._rollout_traj = cur_traj
 
         self.total_steps += stored
         return trajectories
