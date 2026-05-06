@@ -1,7 +1,7 @@
 """SF3 action encoding — 8-way joystick + 6 buttons."""
 
 from enum import IntEnum
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 
 import torch
 
@@ -44,19 +44,6 @@ BTN_NAMES = {
     Button.LK: "LK", Button.MK: "MK", Button.HK: "HK",
 }
 
-# ---------------------------------------------------------------------------
-# Action ↔ Tensor conversion
-# ---------------------------------------------------------------------------
-
-def encode_action(direction: Direction,
-                  active_buttons: List[Button]) -> Dict[str, torch.Tensor]:
-    mov = torch.tensor(int(direction), dtype=torch.long)
-    btn = torch.zeros(6, dtype=torch.float32)
-    for b in active_buttons:
-        btn[int(b)] = 1.0
-    return {"movement": mov, "buttons": btn}
-
-
 def decode_action(movement_logits: torch.Tensor,
                   button_logits: torch.Tensor,
                   threshold: float = 0.5) -> Tuple[Direction, List[Button]]:
@@ -71,36 +58,6 @@ def action_to_str(direction: Direction,
     d = DIR_NAMES[direction]
     b = "+".join(BTN_NAMES[x] for x in buttons)
     return f"{d}{ '+' + b if b else ''}"
-
-# ---------------------------------------------------------------------------
-# Mirroring — for training from P2's perspective
-# ---------------------------------------------------------------------------
-
-_MIRROR_DIR = {
-    Direction.NEUTRAL: Direction.NEUTRAL,
-    Direction.UP: Direction.UP,
-    Direction.UP_FORWARD: Direction.UP_BACK,
-    Direction.FORWARD: Direction.BACK,
-    Direction.DOWN_FORWARD: Direction.DOWN_BACK,
-    Direction.DOWN: Direction.DOWN,
-    Direction.DOWN_BACK: Direction.DOWN_FORWARD,
-    Direction.BACK: Direction.FORWARD,
-    Direction.UP_BACK: Direction.UP_FORWARD,
-}
-
-
-def mirror_direction(d: Direction) -> Direction:
-    """Flip left/right in a Direction enum (e.g. FORWARD → BACK)."""
-    return _MIRROR_DIR[d]
-
-
-def mirror_bitfield(bits: int) -> int:
-    """Flip Left (bit 2) ↔ Right (bit 3) in a CPS3 input bitfield."""
-    left = (bits >> 2) & 1
-    right = (bits >> 3) & 1
-    bits &= ~(1 << 2 | 1 << 3)          # clear both
-    bits |= (left << 3) | (right << 2)  # swap
-    return bits
 
 # ---------------------------------------------------------------------------
 # FBNeo bitfield decoding (CPS3: sfiii3 / sfiii3n)

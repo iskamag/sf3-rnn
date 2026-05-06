@@ -148,18 +148,3 @@ class SF3Agent(nn.Module):
         return self.model(flows, ego_player,
                           hidden=hidden, context=context,
                           prev_actions=prev_actions, audio=audio)
-
-    # ------------------------------------------------------------------
-    @torch.no_grad()
-    def get_value(self,
-                  flows: torch.Tensor,
-                  hidden: HiddenState,
-                  context: Optional[torch.Tensor] = None,
-                  audio: Optional[torch.Tensor] = None,
-                  ego_player: float = 0.0,
-                  ) -> torch.Tensor:
-        ego = torch.full((1, 1), ego_player, device=flows.device, dtype=torch.float32)
-        out = self.model(flows, ego,
-                         hidden=hidden, context=context,
-                         audio=audio)
-        return out["value"][:, -1, -1].squeeze(-1)
