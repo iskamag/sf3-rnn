@@ -195,14 +195,6 @@ audio.wav       — 8-bit mono 16 kHz PCM
 input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2wins" per line
 ```
 
-Repeat for many replays — different players, characters, skill levels.
-Aim for at least 50–100 matches for BC training to be useful.
-
-For a 1-second match-start cue sample:
-```bash
-ffmpeg -y -i hmm_16k.wav -t 1.0 -c:a copy hmm_16k_1s.wav
-```
-
 To inspect a capture (match boundaries, optical flow):
 ```bash
 ./scripts/train.sh view data/captures/1777895668498-5828 \
