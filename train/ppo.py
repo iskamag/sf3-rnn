@@ -202,6 +202,7 @@ class PPOTrainer:
         count = 0
 
         for epoch in range(cfg.ppo_updates):
+            self.optim.zero_grad()
             epoch_loss = 0.0
             epoch_policy = 0.0
             epoch_value = 0.0
@@ -219,6 +220,9 @@ class PPOTrainer:
                 epoch_value += result["value_loss"]
                 epoch_entropy += result["entropy"]
                 n_traj += 1
+
+            torch.nn.utils.clip_grad_norm_(self.agent.parameters(), cfg.max_grad_norm)
+            self.optim.step()
 
             if n_traj == 0:
                 continue
@@ -358,13 +362,10 @@ class PPOTrainer:
             return None
 
         loss = torch.stack(losses).mean()
-        self.optim.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.agent.parameters(), cfg.max_grad_norm)
-        self.optim.step()
 
         return {
-            "loss": torch.stack(losses).mean().item(),
+            "loss": loss.item(),
             "policy_loss": torch.stack(p_losses).mean().item() if p_losses else 0.0,
             "value_loss": torch.stack(v_losses).mean().item() if v_losses else 0.0,
             "entropy": torch.stack(entropies).mean().item() if entropies else 0.0,
