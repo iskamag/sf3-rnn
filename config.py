@@ -48,8 +48,9 @@ class Config:
         return self.sensory_lag_frames + self.motor_lag_frames
 
     # --- Audio ---
-    # Audio mode. Enabled runs with audio features and requires audio.wav
-    # during collection. Disabled omits the audio encoder.
+    # Hard switch — when True the model always expects audio; the dataset
+    # MUST contain audio features and collection will error if audio.wav
+    # is missing.  When False the audio encoder is stripped entirely.
     use_audio: bool = True
     audio_sample_rate: int = 16000
     audio_feat_dim: int = 15         # MFCC (13) + RMS (1) + centroid (1)
@@ -57,7 +58,7 @@ class Config:
 
     # --- Model ---
     feature_dim: int = 256
-    action_embed_dim: int = 64     # prev-action embedding fed into minGRU
+    action_embed_dim: int = 64     # previous-action embedding fed into minGRU
     temporal_stride: int = 4       # recurrence step span (frames); produces N actions/step
     mingru_hidden: int = 512
     mingru_layers: int = 2

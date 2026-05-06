@@ -43,7 +43,7 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 consecutive action sets, matching the ~67 ms human decision cadence while
 vision stays at 60 Hz.
 
-**Autoregressive prev-actions**: The model feeds its own prev N actions
+**Autoregressive prev-actions**: The model feeds its own previous N actions
 (distribution over movement + buttons) into the next recurrence step via a
 learned embedding, pooled across the N frames.  During BC/PPO training this
 uses teacher-forced ground-truth, shifted by one step; at inference it uses

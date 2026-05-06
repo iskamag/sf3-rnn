@@ -211,7 +211,7 @@ class SF3RNN(nn.Module):
     # ------------------------------------------------------------------
     def _encode_prev_actions(self, prev_actions: torch.Tensor
                              ) -> torch.Tensor:
-        """Encode N prev-action distributions → (B, T, E) vector.
+        """Encode N previous action distributions → (B, T, E) vector.
 
         Uses a per-frame MLP followed by a small causal 1D conv that
         preserves intra-stride ordering.
@@ -271,7 +271,7 @@ class SF3RNN(nn.Module):
         # --- ego player ---
         ego = ego_player.unsqueeze(1).expand(-1, T, -1)               # (B, T, 1)
 
-        # --- prev actions: temporal conv preserves intra-stride ordering ---
+        # --- previous actions: temporal conv preserves intra-stride ordering ---
         if prev_actions is not None:
             act_emb = self._encode_prev_actions(prev_actions)          # (B, T, E)
         else:

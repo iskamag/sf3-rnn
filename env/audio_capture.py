@@ -59,7 +59,7 @@ class AudioCapture:
 
 
 # ---------------------------------------------------------------------------
-# Audio capture stub
+# Stub for when audio capture isn't available
 # ---------------------------------------------------------------------------
 class AudioCaptureStub:
     def start(self): pass

@@ -164,7 +164,7 @@ class PPOTrainer:
             done = terminated or truncated
             collected += 1
 
-            # Store transitions after the motor buffer starts executing actions.
+            # Only store when motor buffer is primed (action was actually executed)
             if delayed is not None:
                 cur_traj.append(Transition(
                     flow=flow_t.squeeze(0).cpu(),
