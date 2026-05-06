@@ -110,6 +110,9 @@ class PPOTrainer:
         else:
             self._audio_cap = None
 
+        if cfg.compile_model:
+            self.agent.model = torch.compile(self.agent.model)
+
     # ------------------------------------------------------------------
     def close(self):
         if self._audio_cap is not None:
