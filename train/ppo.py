@@ -133,6 +133,8 @@ class PPOTrainer:
         if self._rollout_obs is None or self._rollout_motor_buf is None:
             obs, _ = self.env.reset()
             self.agent.reset()
+            if self._audio_buf is not None:
+                self._audio_buf.reset()
             motor_buf = OutputDelayBuffer(motor_lag=self.cfg.motor_lag_frames)
         else:
             obs = self._rollout_obs
@@ -186,6 +188,8 @@ class PPOTrainer:
                 self.episode += 1
                 obs, _ = self.env.reset()
                 self.agent.reset()
+                if self._audio_buf is not None:
+                    self._audio_buf.reset()
                 motor_buf = OutputDelayBuffer(motor_lag=self.cfg.motor_lag_frames)
 
         self._rollout_obs = obs
