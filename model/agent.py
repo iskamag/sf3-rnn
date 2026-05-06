@@ -156,8 +156,9 @@ class SF3Agent(nn.Module):
                   hidden: HiddenState,
                   context: Optional[torch.Tensor] = None,
                   audio: Optional[torch.Tensor] = None,
+                  ego_player: float = 0.0,
                   ) -> torch.Tensor:
-        ego = torch.zeros(1, 1, device=flows.device)
+        ego = torch.full((1, 1), ego_player, device=flows.device, dtype=torch.float32)
         out = self.model(flows, ego,
                          hidden=hidden, context=context,
                          audio=audio)
