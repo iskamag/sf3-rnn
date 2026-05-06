@@ -12,7 +12,4 @@ logs/
 *.npz
 *.zip
 *.tar.gz
-master/
 fcreplay/
-README.html
-log.*
