@@ -99,7 +99,7 @@ st-rnn/
 │   └── game_state.py          # Health-bar detection and HUD extraction
 ├── emulator/
 │   ├── input_log.lua          # FBNeo Lua script — logs P1/P2 inputs, health, stun
-│   ├── recorder.py            # Capture replays — video, audio, inputs (multi-worker)
+│   ├── recorder.py            # Capture replays — video, audio, inputs (multi-worker, timer-based)
 │   └── bot_bridge.lua         # FBNeo Lua script — read bot inputs from file
 ├── data/
 │   └── dataset.py             # PyTorch Dataset (shard directories)
@@ -150,22 +150,17 @@ Also required: `wine`, `gamescope`, `gstreamer`, `pipewire`, and `xdotool`.
 
 Pick replays from [fightcade.com](https://www.fightcade.com/game/sfiii3nr1).
 Copy their URLs — e.g. `https://replay.fightcade.com/fbneo/sfiii3nr1/1777806845400-9194`.
-The last segment (`1777806845400-9194`) is the challenge ID.
+The last segment (`1777806845400-9194`) is the challenge ID.  Each replay also has
+a known duration in seconds (shown on the replay page).
 
-**Single replay:**
-
-```bash
-./emulator/recorder.py <challenge_id>
-```
-
-**Batch capture** — create a file with one ID per line (lines starting with `#`
-are ignored), then fan out across parallel workers:
+**Batch capture** — create a file with one `<challenge_id> <length_seconds>` per
+line (lines starting with `#` are ignored), then fan out across parallel workers:
 
 ```
 # replay_ids.txt
-1777806845400-9194
-1777895668498-5828
-1778123456789-1234
+1777806845400-9194 180
+1777895668498-5828 240
+1778123456789-1234 195
 ```
 
 ```bash
@@ -173,8 +168,9 @@ are ignored), then fan out across parallel workers:
 ./emulator/recorder.py replay_ids.txt --workers 8    # 8 workers
 ```
 
-Already-captured replays (with `input_log.txt` in their output directory)
-are skipped automatically.
+The `length_seconds` is the known replay duration (available on the Fightcade
+replay page).  Already-captured replays (with `input_log.txt` in their output
+directory) are skipped automatically.
 
 What happens per replay:
 1. A per-worker Wine prefix is cloned from `~/.fightcade-wine`
@@ -184,8 +180,8 @@ What happens per replay:
 5. After the replay starts, FBNeo is toggled to fullscreen via `xdotool`
 6. GStreamer captures video (160×120 GRAY8, 60 fps) and audio (16 kHz mono U8)
 7. The Lua script writes per-frame inputs and game state to `input_log.txt`
-8. Replay end is detected by log growth stalling (8 s) or REPLAY_END marker
-9. The emulator is killed (process-group SIGKILL + wineserver -k), log is saved
+8. A countdown timer runs for `length_seconds` from the moment the replay begins
+9. When time expires the emulator is killed (process-group SIGKILL + wineserver -k), log is saved
 
 Each worker reuses its Wine prefix across replays.  Workers are isolated via
 `start_new_session` and per-worker Wine prefixes (`~/.fightcade-wine-replay-{0,1,…}`).

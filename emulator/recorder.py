@@ -2,6 +2,8 @@
 """Record Fightcade FBNeo replays: video, audio, inputs.
 
 Usage: ./emulator/recorder.py replay_ids.txt [--workers N] [--game sfiii3nr1]
+
+replay_ids.txt format: <challenge_id> <length_seconds> per line (comments after #).
 """
 
 import json, os, re, shutil, signal, subprocess, sys, threading, time
