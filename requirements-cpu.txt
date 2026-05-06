@@ -7,6 +7,7 @@ opencv-python>=4.8
 numpy>=1.24
 tqdm>=4.65
 gymnasium>=0.29
+stable-baselines3>=2.3.0
 tensorboard>=2.13
 psutil>=5.9
 sounddevice>=0.4
