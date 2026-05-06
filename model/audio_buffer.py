@@ -36,10 +36,36 @@ class AudioBuffer:
         self._half_window = self.fft_window // 2
         self._samples_per_frame = sample_rate / fps
         self._features: deque[np.ndarray] = deque(maxlen=audio_lag + 8)
-        self._samples = np.zeros(0, dtype=np.float32)
+        self._samples = np.zeros(max(self.fft_window * 4, 4096), dtype=np.float32)
+        self._sample_start = 0
+        self._sample_end = 0
         self._sample_offset = 0
         self._next_frame = 0
         self._lock = threading.Lock()
+
+    def _active_len(self) -> int:
+        return self._sample_end - self._sample_start
+
+    def _ensure_capacity(self, extra: int):
+        active_len = self._active_len()
+        tail_room = len(self._samples) - self._sample_end
+        if tail_room >= extra:
+            return
+
+        if self._sample_start > 0:
+            self._samples[:active_len] = self._samples[self._sample_start:self._sample_end]
+            self._sample_start = 0
+            self._sample_end = active_len
+            tail_room = len(self._samples) - self._sample_end
+            if tail_room >= extra:
+                return
+
+        new_cap = max(len(self._samples) * 2, active_len + extra)
+        new_samples = np.empty(new_cap, dtype=np.float32)
+        new_samples[:active_len] = self._samples[self._sample_start:self._sample_end]
+        self._samples = new_samples
+        self._sample_start = 0
+        self._sample_end = active_len
 
     # ------------------------------------------------------------------
     def add_samples(self, samples: np.ndarray):               # (N,) float32
@@ -49,9 +75,12 @@ class AudioBuffer:
 
         with self._lock:
             samples = np.asarray(samples, dtype=np.float32).reshape(-1)
-            self._samples = np.concatenate([self._samples, samples])
+            self._ensure_capacity(len(samples))
+            self._samples[self._sample_end:self._sample_end + len(samples)] = samples
+            self._sample_end += len(samples)
 
-            available_end = self._sample_offset + len(self._samples)
+            active_len = self._active_len()
+            available_end = self._sample_offset + active_len
             while True:
                 center = int(round((self._next_frame + 0.5) * self._samples_per_frame))
                 start = center - self._half_window
@@ -59,10 +88,10 @@ class AudioBuffer:
                 if end > available_end:
                     break
 
-                local_start = max(start - self._sample_offset, 0)
-                local_end = end - self._sample_offset
+                local_start = self._sample_start + max(start - self._sample_offset, 0)
+                local_end = self._sample_start + (end - self._sample_offset)
                 chunk = np.zeros(self.fft_window, dtype=np.float32)
-                dst_start = local_start - (start - self._sample_offset)
+                dst_start = local_start - (self._sample_start + start - self._sample_offset)
                 chunk[dst_start:dst_start + (local_end - local_start)] = \
                     self._samples[local_start:local_end]
                 self._features.append(extract_features(chunk, self.sample_rate))
@@ -73,15 +102,16 @@ class AudioBuffer:
                 int(round((self._next_frame + 0.5) * self._samples_per_frame))
                 - self._half_window,
             )
-            drop = min(max(keep_from - self._sample_offset, 0), len(self._samples))
+            drop = min(max(keep_from - self._sample_offset, 0), self._active_len())
             if drop:
-                self._samples = self._samples[drop:]
+                self._sample_start += drop
                 self._sample_offset += drop
 
     def reset(self):
         with self._lock:
             self._features.clear()
-            self._samples = np.zeros(0, dtype=np.float32)
+            self._sample_start = 0
+            self._sample_end = 0
             self._sample_offset = 0
             self._next_frame = 0
 
