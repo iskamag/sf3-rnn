@@ -221,12 +221,12 @@ class BCTrainer:
         if self.use_amp:
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optim)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
             self.scaler.step(self.optim)
             self.scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
             self.optim.step()
         return loss.detach(), out["hidden"].detach(), out["context"].detach()
 
