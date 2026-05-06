@@ -135,7 +135,7 @@ class BCTrainer:
                     active = [i for i, s in enumerate(seqs) if step_idx < len(s)]
                     samples = []
                     for i in active:
-                        start, _ = seqs[i][step_idx]
+                        start = seqs[i][step_idx]
                         samples.append(self.dataset.get_sequence(group[i], start, egos[i]))
                     batch = default_collate(samples)
 

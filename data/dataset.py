@@ -48,8 +48,8 @@ class ReplayDataset(Dataset):
             p for p in data_dir.iterdir()
             if p.is_dir() and (p / "flow_u8.npy").exists())
         self.files = shard_dirs
-        self._index: List[Tuple[int, int, int]] = []       # (source_idx, start, jitter_end)
-        self._sequences_by_file: List[List[Tuple[int, int]]] = [
+        self._index: List[Tuple[int, int]] = []            # (source_idx, start)
+        self._sequences_by_file: List[List[int]] = [
             [] for _ in self.files]
 
         if not self.files:
@@ -69,16 +69,15 @@ class ReplayDataset(Dataset):
 
             if max_start >= min_start:
                 for start in range(min_start, max_start + 1, segment_stride):
-                    jitter_end = min(start + segment_stride - 1, max_start)
-                    self._index.append((fi, start, jitter_end))
-                    self._sequences_by_file[fi].append((start, jitter_end))
+                    self._index.append((fi, start))
+                    self._sequences_by_file[fi].append(start)
 
         random.shuffle(self._index)
 
     # ------------------------------------------------------------------
     def file_of(self, idx: int) -> Path:
         """Return the shard directory that index *idx* belongs to."""
-        fi, _, _ = self._index[idx]
+        fi, _ = self._index[idx]
         return self.files[fi]
 
     # ------------------------------------------------------------------
@@ -88,7 +87,7 @@ class ReplayDataset(Dataset):
     def num_sources(self) -> int:
         return len(self.files)
 
-    def sequences_for_file(self, fi: int) -> List[Tuple[int, int]]:
+    def sequences_for_file(self, fi: int) -> List[int]:
         return self._sequences_by_file[fi]
 
     def _load_file(self, fi: int) -> Dict[str, np.ndarray]:
@@ -116,7 +115,7 @@ class ReplayDataset(Dataset):
         return loaded
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        fi, start, _ = self._index[idx]
+        fi, start = self._index[idx]
         ego = random.randint(0, 1)  # 0 = P1, 1 = P2
         return self.get_sequence(fi, start, ego)
 

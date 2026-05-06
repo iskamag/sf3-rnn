@@ -61,13 +61,3 @@ class ReactionBuffer:
         tensor = preprocess_flow(raw, self.frame_width, self.frame_height, self.flow_norm)
         return tensor.unsqueeze(0).unsqueeze(0).to(self.device)
 
-    def get_flow_at(self, offset: int) -> Optional[torch.Tensor]:
-        """Return the flow frame from *offset* frames ago (offset ≥ 1)."""
-        need = offset + 2
-        if len(self._frames) < need:
-            return None
-        prev = self._frames[-offset - 2]
-        curr = self._frames[-offset - 1]
-        raw = compute_flow(prev, curr)
-        tensor = preprocess_flow(raw, self.frame_width, self.frame_height, self.flow_norm)
-        return tensor.unsqueeze(0).unsqueeze(0).to(self.device)
