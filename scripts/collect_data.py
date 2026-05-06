@@ -294,14 +294,18 @@ def main():
         nf = min(len(frames) - 1, n_frames - 1)
         flows = np.empty((nf, 2, cfg.flow_height, cfg.flow_width), dtype=np.uint8)
         with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as pool:
-            futures = [
+            fut_map = {
                 pool.submit(_compute_flow_pair,
                             (i, frames[i], frames[i + 1],
-                             cfg.flow_width, cfg.flow_height, cfg.flow_norm))
+                             cfg.flow_width, cfg.flow_height, cfg.flow_norm)): i
                 for i in range(nf)
-            ]
-            for fut in as_completed(futures):
-                i, flow = fut.result()
+            }
+            for fut in as_completed(fut_map):
+                try:
+                    i, flow = fut.result()
+                except Exception as e:
+                    tqdm.write(f"  [warn] flow frame {fut_map[fut]} failed: {e}")
+                    continue
                 flows[i] = flow
 
         # ---- audio ----
