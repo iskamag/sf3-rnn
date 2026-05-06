@@ -39,17 +39,17 @@ cloning on Fightcade replays, then fine-tuned with PPO.
 ```
 
 **Stride-N recurrence**: The minGRU runs once per `temporal_stride` (N) frames
-(default N=4, ~15 Hz) instead of at 60 Hz.  Each step ingests N flow frames
-and produces N consecutive action sets — matching the ~67 ms human decision
-cadence.  Vision still samples at 60 Hz; only the recurrence is coarsened.
+(default N=4, ~15 Hz). Each step ingests N flow frames and produces N
+consecutive action sets, matching the ~67 ms human decision cadence while
+vision stays at 60 Hz.
 
-**Autoregressive prev-actions**: The model feeds its own previous N actions
+**Autoregressive prev-actions**: The model feeds its own prev N actions
 (distribution over movement + buttons) into the next recurrence step via a
 learned embedding, pooled across the N frames.  During BC/PPO training this
 uses teacher-forced ground-truth, shifted by one step; at inference it uses
 the model's own softmax/sigmoid.
 
-**Why optical flow instead of raw pixels?**
+**Optical flow**
 - Invariant to static backgrounds and character costumes
 - Motion patterns encode hit-stun, block-stun, knockdown, and spacing
 - 2-channel input is cheaper than RGB and more robust
@@ -69,8 +69,8 @@ profile across the full match from optical flow alone.
 
 ### Model detail
 
-- **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d; processes pooled flow, not per-frame
-- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → per-frame MLP → max-pool over N frames (captures onset events vs mean-pool dilution)
+- **CNN**: 4 conv layers (stride-2) → adaptive pool 4×4 → FC 256-d; processes pooled flow frames
+- **Audio**: 15-d per-frame features (13 MFCC + RMS + centroid) → per-frame MLP → max-pool over N frames to emphasize onset events
 - **minGRU**: 2 layers, hidden=512, dropout=0.1, runs once per N=4 frames
 - **minGRU input**: 256 (pooled flow) + 64 (audio) + 128 (context) + 1 (ego) + 64 (prev-actions) = 513-d (with audio)
 - **Action decoder**: learned sub-frame position embedding `(N, 512)` broadcast onto hidden → shared MLP → N independent (movement, buttons, value) sets per step
@@ -78,8 +78,8 @@ profile across the full match from optical flow alone.
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 - **Value head**: merged into the per-slot action decoder; scalar per frame
 - **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input
-- **Prev-actions**: per-frame MLP + causal depthwise 1D conv over N frames → preserves intra-stride button-press ordering (LP→MP→HP vs MP→LP→HP distinguishable, unlike mean-pool)
-- **Per-frame variation**: comes from a learned sub-frame position embedding, not per-frame CNN features — cuts CNN FLOPs by N×
+- **Prev-actions**: per-frame MLP + causal depthwise 1D conv over N frames → preserves intra-stride button-press ordering
+- **Per-frame variation**: comes from a learned sub-frame position embedding, which cuts CNN FLOPs by N×
 
 ## Project layout
 
@@ -124,12 +124,10 @@ st-rnn/
 source .venv/bin/activate
 ```
 
-The setup script creates `.venv/` and installs CPU-only PyTorch by default, so
-latest `minGRU-pytorch` does not pull CUDA wheels on CPU systems. For CUDA
-installs, run `./scripts/setup_env.sh cuda` instead.
+The setup script creates `.venv/` and installs CPU PyTorch.
 
-CPU works; CUDA is optional but recommended for training.  Optical flow runs on
-CPU via OpenCV (Farneback, ROI-based — only on changed regions).
+This repo currently runs on CPU. Optical flow runs through OpenCV
+(Farneback, ROI-based on changed regions).
 
 ## Guide: from replay to trained model
 
@@ -316,8 +314,7 @@ python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
 
 Manual start/stop — the bot captures frames and audio, runs them through
 the full latency pipeline (sensory buffers, stride-N accumulation, motor
-buffer), and injects inputs.  No menu navigation or health-bar detection;
-turn the bot on when already in-game.
+buffer), and injects inputs. Start it when already in-game.
 
 Override latency:
 
@@ -379,10 +376,9 @@ when P2's combo counter is non-zero (P2 is hitting P1), and vice versa.
 
 ## Notes
 
-- The optical-flow CNN is a small custom architecture (not a pretrained
-  backbone) — flow fields are 2-channel and cheap to process.
+- The optical-flow CNN is a small custom architecture sized for 2-channel flow fields.
 - BC trains on diverse player data — the model learns general SF3
-  competency, not to mimic a single player.
+  competency across players.
 - During offline capture health/stun is read from CPS3 memory by the Lua
   script; training data is ground-truth accurate.
 - The MatchContext GRU gives the minGRU a persistent 128-d opponent profile

@@ -3,8 +3,8 @@
 Each ~16 ms window (256 samples @ 16 kHz, close enough to 1/60 s) produces
 a 15-d vector:  13 MFCCs + 1 RMS energy + 1 spectral centroid.
 
-Using 256 (= 2⁸) keeps the FFT radix-2 and avoids padding.  The 0.67 ms
-mismatch vs. a true 60 fps frame (16.667 ms) is negligible.
+Using 256 (= 2⁸) keeps the FFT radix-2 and avoids padding. Each window spans
+about 16 ms at 16 kHz.
 """
 
 from __future__ import annotations

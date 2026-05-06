@@ -59,7 +59,7 @@ def parse_log(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def boundaries_to_mask(bounds: list[tuple[int, int]], n: int) -> np.ndarray:
-    """Return integer array of length *n* — -1 = not in match, >=0 = match idx."""
+    """Return an integer array of length *n* with match indices."""
     mask = np.full(n, -1, dtype=np.int32)
     for mi, (a, b) in enumerate(bounds):
         mask[a:b] = mi
@@ -71,7 +71,7 @@ def draw_overlay(frame: np.ndarray, idx: int, match_idx: int,
                  fps: int, playing: bool,
                  show_flow: bool, flow_frame: np.ndarray | None) -> np.ndarray:
     H, W = 120, 160       # video resolution
-    CANVAS_W = 400        # wider canvas so info bar isn't clipped
+    CANVAS_W = 400        # canvas width for the video and info bar
     BAR_H = 36
     OX = (CANVAS_W - W) // 2  # horizontal offset to centre the video
     out = np.zeros((H + BAR_H, CANVAS_W, 3), dtype=np.uint8)

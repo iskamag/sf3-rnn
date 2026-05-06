@@ -53,9 +53,6 @@ class GameState:
         )
 
 
-_IN_MENU = GameState()
-
-
 class SF3Env(gym.Env):
     """Gymnasium environment wrapping Fightcade FBNeo.
 
@@ -64,8 +61,7 @@ class SF3Env(gym.Env):
     real health delta, round/match wins, and remaining health.
 
     The observation is a delayed optical-flow frame from the ReactionBuffer
-    (sensory lag).  The screen is still captured for flow, but reward does
-    NOT depend on pixel-peeping.
+    (sensory lag). Reward comes from the Lua bridge game state.
     """
 
     def __init__(self, cfg: Config, monitor: dict | None = None):
@@ -121,9 +117,6 @@ class SF3Env(gym.Env):
         self._prev_hp_opp = 1.0
         self._prev_wins_self = 0
 
-        # Navigate menus until gameplay starts.
-        self._navigate_menu()
-
         # Prime the reaction buffer.
         prime_frames = self.cfg.sensory_lag_frames + 2
         frame = self._capture()
@@ -144,8 +137,8 @@ class SF3Env(gym.Env):
              ) -> tuple[np.ndarray, float, bool, bool, dict]:
         """Execute *action* and return (obs, reward, terminated, truncated, info).
 
-        *action* is the motor-delayed action.  Reward is computed from actual
-        game state read from the Lua bridge — no pixel-peeping.
+        *action* is the motor-delayed action. Reward is computed from the
+        game state read from the Lua bridge.
         """
         dir_int = int(action[0])
         buttons = [Button(i) for i in range(6) if action[i + 1] == 1]
@@ -173,8 +166,8 @@ class SF3Env(gym.Env):
         else:
             obs = np.zeros((2, self.cfg.frame_height, self.cfg.frame_width), dtype=np.float32)
 
-        # Terminate when health is gone → back to menu.
-        terminated = self._is_menu(gs)
+        # Terminate when the health bars disappear.
+        terminated = self._health_bars_hidden(gs)
         truncated = False
 
         return obs, reward, terminated, truncated, {}
@@ -233,8 +226,8 @@ class SF3Env(gym.Env):
             return GameState()
 
     @staticmethod
-    def _is_menu(gs: GameState) -> bool:
-        """Return True if we are at the menu / character select (not in gameplay)."""
+    def _health_bars_hidden(gs: GameState) -> bool:
+        """Return True when the HUD health bars are absent."""
         return gs.p1_health < 0.05 and gs.p2_health < 0.05
 
     # ------------------------------------------------------------------
@@ -253,34 +246,6 @@ class SF3Env(gym.Env):
         tmp.write_text(f"{bits}\n")
         tmp.replace(self._input_path)
 
-    def _navigate_menu(self):
-        """Send menu-navigation actions until the Lua bridge reports gameplay."""
-        seq = self.cfg.char_select_seq
-        for _ in range(self.cfg.post_match_stall):
-            self._send_input(Direction.NEUTRAL, [])
-            self._capture()
-
-        for direction_name, button_names, hold in seq:
-            d = getattr(Direction, direction_name.upper())
-            b = [getattr(Button, n.upper()) for n in button_names]
-            for _ in range(hold):
-                self._send_input(d, b)
-                self._capture()
-
-        # Wait until health is visible.
-        health_seen = 0
-        for _ in range(self.cfg.menu_detect_frames):
-            self._send_input(Direction.NEUTRAL, [])
-            self._capture()
-            gs = self._read_state()
-            if not self._is_menu(gs):
-                health_seen += 1
-                if health_seen >= 6:
-                    break
-            else:
-                health_seen = 0
-
-    @staticmethod
     def _resize_frame(raw: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
         h, w = raw.shape[:2]
         aspect = 4 / 3
@@ -298,8 +263,7 @@ class SF3Env(gym.Env):
 class MssScreenEnv:
     """Minimal screen-capture environment for ``scripts/run_bot.py``.
 
-    No reward computation, no latency buffers — just captures the game
-    window and sends inputs via the Lua bridge.
+    Captures the game window and sends inputs via the Lua bridge.
     """
 
     def __init__(self, cfg: Config):

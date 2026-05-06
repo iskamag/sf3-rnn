@@ -59,8 +59,8 @@ def load_audio_features(wav_path: Path, num_frames: int,
     half_window = fft_window // 2
     samples_per_frame = sample_rate / fps
 
-    # Build all windows at once — use sliding_window_view for interior
-    # frames (the vast majority) and a manual loop only for boundaries.
+    # Build the interior windows with sliding_window_view and fill the
+    # boundary windows with a small explicit loop.
     chunks_raw = np.zeros((num_frames, fft_window), dtype=np.float32)
     window = np.hanning(fft_window).astype(np.float32)
     centers = np.round((np.arange(num_frames) + 0.5) * samples_per_frame).astype(int)
@@ -148,8 +148,8 @@ def parse_input_log(path: Path) -> tuple:
         p1_mov[i] = int(d)
         for b in bs:
             p1_btn[i, int(b)] = 1.0
-        # P2 actions — raw joystick-relative, no mirroring (the model gets a
-        # player-indicator bit to learn the P1/P2 mapping from visual context).
+        # P2 actions stay joystick-relative, and the player indicator bit
+        # supplies perspective information to the model.
         p2_bits = int(parts[2])
         d2, bs2 = bitfield_to_action(p2_bits)
         p2_mov[i] = int(d2)
@@ -183,7 +183,7 @@ def save_match_shard(output_dir: Path, stem: str, idx: int,
     f_start = max(0, v_start)
     f_end = min(flows_u8.shape[0], v_end - 1)
     if f_end <= f_start:
-        return None  # flow data doesn't cover this match segment
+        return None  # skip segments outside the available flow range
     out = output_dir / f"{stem}_match{idx:03d}"
     out.mkdir(parents=True, exist_ok=True)
 

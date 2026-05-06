@@ -195,7 +195,7 @@ class BCTrainer:
         if context is not None:
             context = context.to(self.device, non_blocking=True)
 
-        # --- previous-action inputs (teacher forcing, shifted by one step) ---
+        # --- prev-action inputs (teacher forcing, shifted by one step) ---
         mov_oh = F.one_hot(movement, num_classes=self.cfg.num_directions).float()   # (B, T, N, 9)
         shifted_mov = torch.cat([
             torch.zeros(B, 1, N, self.cfg.num_directions, device=self.device),

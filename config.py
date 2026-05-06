@@ -48,9 +48,8 @@ class Config:
         return self.sensory_lag_frames + self.motor_lag_frames
 
     # --- Audio ---
-    # Hard switch — when True the model always expects audio; the dataset
-    # MUST contain audio features and collection will error if audio.wav
-    # is missing.  When False the audio encoder is stripped entirely.
+    # Audio mode. Enabled runs with audio features and requires audio.wav
+    # during collection. Disabled omits the audio encoder.
     use_audio: bool = True
     audio_sample_rate: int = 16000
     audio_feat_dim: int = 15         # MFCC (13) + RMS (1) + centroid (1)
@@ -58,7 +57,7 @@ class Config:
 
     # --- Model ---
     feature_dim: int = 256
-    action_embed_dim: int = 64     # previous-action embedding fed into minGRU
+    action_embed_dim: int = 64     # prev-action embedding fed into minGRU
     temporal_stride: int = 4       # recurrence step span (frames); produces N actions/step
     mingru_hidden: int = 512
     mingru_layers: int = 2
@@ -107,19 +106,6 @@ class Config:
     reward_match_win: float = 50.0       # bonus for winning the match
     reward_remaining_health: float = 2.0 # per-point of remaining health when winning a round
     reward_idle_penalty: float = -0.01   # small penalty for no inputs
-
-    # --- Character select (inference only) ---
-    # Frames without health bars that trigger menu mode.
-    menu_detect_frames: int = 150        # 2.5 s
-    # After a match ends, stall this many frames before navigating menus.
-    post_match_stall: int = 30
-    # Sequence of (direction_name, button_names, hold_frames).
-    # Direction / button names must match the enums in model/action_space.py.
-    # "NEUTRAL" + empty buttons + hold_frames = wait.
-    char_select_seq: tuple = (
-        ("NEUTRAL",  (),        60),    # wait for screen to settle
-        ("NEUTRAL",  ("LP",),   10),    # confirm default character (Ryu)
-    )
 
     # --- Fightcade FBNeo Lua bridge ---
     # emulator/bot_bridge.lua reads this file once per frame and applies P1 input.

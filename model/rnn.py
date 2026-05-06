@@ -35,11 +35,11 @@ class _FlowEncoder(nn.Module):
     """Lightweight convolutional flow encoder.
 
     Uses InstanceNorm (no running stats overhead on CPU) and smaller channel
-    counts to reduce FLOPs ~6× vs the original while preserving receptive field.
+    counts to keep the encoder efficient while preserving receptive field.
     Base channel count ``ch`` controls the capacity/speed trade-off:
-      ch=16  → fastest, ~36 MFLOPs/frame  (~7× faster than original 241 MFLOPs)
-      ch=24  → balanced, ~78 MFLOPs/frame  (~3× faster)
-      ch=32  → higher capacity, ~126 MFLOPs/frame  (~2× faster)
+      ch=16  → ~36 MFLOPs/frame
+      ch=24  → ~78 MFLOPs/frame
+      ch=32  → ~126 MFLOPs/frame
     """
     def __init__(self, feature_dim: int = 256, ch: int = 16):
         super().__init__()
@@ -154,9 +154,8 @@ class SF3RNN(nn.Module):
             nn.Linear(action_embed_dim, action_embed_dim),
         )
 
-        # Temporal encoder over the N prev-action embeddings — a depthwise 1D
-        # causal conv preserves intra-stride button-press ordering (e.g.
-        # LP→MP→HP vs MP→LP→HP produce different encodings, unlike mean-pool).
+        # Temporal encoder over the N prev-action embeddings. The depthwise 1D
+        # causal conv preserves intra-stride button-press ordering.
         self._action_temporal = nn.Sequential(
             nn.Conv1d(action_embed_dim, action_embed_dim,
                       kernel_size=3, padding=0, groups=action_embed_dim),
@@ -212,10 +211,10 @@ class SF3RNN(nn.Module):
     # ------------------------------------------------------------------
     def _encode_prev_actions(self, prev_actions: torch.Tensor
                              ) -> torch.Tensor:
-        """Encode N previous action distributions → (B, T, E) vector.
+        """Encode N prev-action distributions → (B, T, E) vector.
 
         Uses a per-frame MLP followed by a small causal 1D conv that
-        preserves intra-stride ordering (unlike mean-pool).
+        preserves intra-stride ordering.
         """
         B, T, N = prev_actions.shape[:3]
 
@@ -272,7 +271,7 @@ class SF3RNN(nn.Module):
         # --- ego player ---
         ego = ego_player.unsqueeze(1).expand(-1, T, -1)               # (B, T, 1)
 
-        # --- previous actions: temporal conv preserves intra-stride ordering ---
+        # --- prev actions: temporal conv preserves intra-stride ordering ---
         if prev_actions is not None:
             act_emb = self._encode_prev_actions(prev_actions)          # (B, T, E)
         else:
