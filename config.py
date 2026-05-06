@@ -1,5 +1,9 @@
+import random
 from pathlib import Path
 from dataclasses import dataclass, field
+
+import numpy as np
+import torch
 
 
 @dataclass
@@ -132,10 +136,18 @@ class Config:
     ckpt_dir: Path = field(default_factory=lambda: Path("checkpoints"))
     log_dir: Path = field(default_factory=lambda: Path("logs"))
 
+    # --- Reproducibility ---
+    seed: int = 0
+
     # --- Device ---
     device: str = "cuda"
 
     def __post_init__(self):
+        if self.seed is not None:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+            torch.cuda.manual_seed_all(self.seed)
         for d in [self.data_dir, self.replay_dir, self.processed_dir,
                   self.ckpt_dir, self.log_dir]:
             d.mkdir(parents=True, exist_ok=True)
