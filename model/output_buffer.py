@@ -40,5 +40,8 @@ class OutputDelayBuffer:
             return self._queue.popleft()
         return None
 
+    def reset(self):
+        self._queue.clear()
+
     def ready(self) -> bool:
         return len(self._queue) > self.motor_lag

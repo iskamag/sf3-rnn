@@ -40,6 +40,10 @@ class ReactionBuffer:
         self._frames: deque[np.ndarray] = deque(maxlen=sensory_lag + extra + 2)
 
     # ------------------------------------------------------------------
+    def reset(self):
+        self._frames.clear()
+
+    # ------------------------------------------------------------------
     def add_frame(self, frame_rgb: np.ndarray):                # (H, W, 3) uint8
         gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
         gray = cv2.resize(gray, (self.frame_width, self.frame_height))

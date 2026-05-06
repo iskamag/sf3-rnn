@@ -78,6 +78,13 @@ class AudioBuffer:
                 self._samples = self._samples[drop:]
                 self._sample_offset += drop
 
+    def reset(self):
+        with self._lock:
+            self._features.clear()
+            self._samples = np.zeros(0, dtype=np.float32)
+            self._sample_offset = 0
+            self._next_frame = 0
+
     def ready(self) -> bool:
         with self._lock:
             return len(self._features) >= self.audio_lag + 1
