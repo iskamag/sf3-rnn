@@ -134,7 +134,7 @@ def has_health_bar(frame: np.ndarray, roi: dict,
 
 def _find_template_positions(audio: "np.ndarray",
                              template: "np.ndarray",
-                             corr_threshold: float = 0.6,
+                             corr_threshold: float = 0.5,
                              ) -> "np.ndarray":
     """Return sorted sample offsets where *template* cross-correlates above threshold.
 
@@ -202,7 +202,7 @@ def audio_match_signal(audio_path: "Path",
                        start_offset_frames: int = 0,
                        input_offset_frames: int = 0,
                        min_match_len: int = 120,
-                       corr_threshold: float = 0.6,
+                       corr_threshold: float = 0.5,
                        ) -> "list[tuple[int, int]]":
     """Return (start, end) frame pairs in *input-log* frame space.
 

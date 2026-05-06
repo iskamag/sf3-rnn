@@ -240,7 +240,7 @@ def main():
     p.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     p.add_argument("--match-template", type=Path, default=Path("hmm_16k_08s.wav"),
                    help="Audio cue template used to detect match starts")
-    p.add_argument("--corr-threshold", type=float, default=0.6,
+    p.add_argument("--corr-threshold", type=float, default=0.5,
                    help="Normalised cross-correlation threshold for template matching")
     args = p.parse_args()
 
