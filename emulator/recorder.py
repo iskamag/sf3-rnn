@@ -145,7 +145,7 @@ class CaptureError(Exception):
     pass
 
 
-def capture_one(challenge_id: str, game: str, wine_pfx: Path) -> None:
+def capture_one(challenge_id: str, game: str, wine_pfx: Path, length: int) -> None:
     out = CAPTURES_DIR / challenge_id
     if (out / "input_log.txt").exists() or (out / "video.raw").exists():
         print(f"SKIP {challenge_id} — already captured"); return
@@ -166,7 +166,7 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path) -> None:
     def cleanup(save_log=True):
         for p in pipes:
             p.set_state(Gst.State.NULL); p.get_state(3 * Gst.SECOND)
-        if emu and emu.poll() is None:
+        if emu:
             try:
                 os.killpg(emu.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -176,7 +176,10 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path) -> None:
                 emu.kill()
             except Exception:
                 pass
-            emu.wait(timeout=3)
+            try:
+                emu.wait(timeout=3)
+            except Exception:
+                pass
         subprocess.run(["wineserver", "-k"], env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
         if save_log and log.exists() and log.stat().st_size > 0:
@@ -228,22 +231,12 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path) -> None:
         else:
             print("  audio: silent")
 
-        prev_size, stall = 0, 0
+        started = time.time()
         while emu.poll() is None and not _shutdown.is_set():
-            time.sleep(2)
-            if log.exists():
-                try:
-                    if "REPLAY_END" in log.read_text()[-256:]:
-                        print("  REPLAY_END"); break
-                except Exception:
-                    pass
-                size = log.stat().st_size
-                if size > 0 and size == prev_size:
-                    stall += 1
-                    if stall >= 4:
-                        print(f"  stalled ({size}B)"); break
-                else:
-                    stall = 0; prev_size = size
+            elapsed = time.time() - started
+            if elapsed >= length:
+                print(f"  time ({elapsed:.0f}s)"); break
+            time.sleep(1)
 
         print(f"  done — {challenge_id}")
 
@@ -256,15 +249,15 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path) -> None:
 # ── worker ───────────────────────────────────────────────────────────
 
 
-def capture_chunk(worker_id: int, ids: list[str], game: str) -> None:
+def capture_chunk(worker_id: int, ids: list[tuple[str, int]], game: str) -> None:
     pfx = Path.home() / f".fightcade-wine-replay-{worker_id}"
     if BASE_WINE_PFX.is_dir() and not (pfx / "drive_c").is_dir():
         print(f"[worker {worker_id}] cloning {pfx}")
         subprocess.run(["cp", "-a", str(BASE_WINE_PFX), str(pfx)], check=True)
-    for cid in ids:
+    for cid, length in ids:
         if _shutdown.is_set():
             break
-        capture_one(cid, game, pfx)
+        capture_one(cid, game, pfx, length)
 
 
 # ── main ─────────────────────────────────────────────────────────────
@@ -283,16 +276,26 @@ def main():
             line = raw.split("#")[0].strip()
             if not line:
                 continue
-            if (CAPTURES_DIR / line / "input_log.txt").exists():
-                print(f"SKIP {line} (already captured)"); continue
-            ids.append(line)
+            parts = line.split()
+            if len(parts) < 2:
+                print(f"SKIP {line!r} — missing length"); continue
+            cid = parts[0]
+            try:
+                length = int(parts[1])
+            except ValueError:
+                print(f"SKIP {line!r} — invalid length"); continue
+            if length <= 0:
+                print(f"SKIP {line!r} — non-positive length"); continue
+            if (CAPTURES_DIR / cid / "input_log.txt").exists():
+                print(f"SKIP {cid} (already captured)"); continue
+            ids.append((cid, length))
     if not ids:
         print("No replays to capture."); return
 
     nw = min(args.workers, len(ids))
     chunks = [[] for _ in range(nw)]
-    for i, cid in enumerate(ids):
-        chunks[i % nw].append(cid)
+    for i, (cid, length) in enumerate(ids):
+        chunks[i % nw].append((cid, length))
     print(f"=== {len(ids)} replays  ->  {nw} workers ===")
 
     for sig in (signal.SIGINT, signal.SIGTERM):

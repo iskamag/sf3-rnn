@@ -27,19 +27,6 @@ local p1_wins = 0
 local p2_wins = 0
 local round_over = false
 
--- Replay-end detection: after the quark stream ends, the emulator
--- either hangs in frameadvance or keeps returning without advancing
--- the frame counter.  Three consecutive dead frames = replay done.
-local last_fc = -1
-local dead_fc = 0
-
-local function end_replay()
-    out:write("REPLAY_END\n")
-    out:flush()
-    out:close()
-    os.exit(0)
-end
-
 local function read_bits(prefix)
     local j = joypad.get()
     local bits = 0
@@ -114,13 +101,4 @@ print("input_log.lua: logging")
 while true do
     log_frame()
     emu.frameadvance()
-
-    local fc = emu.framecount()
-    if fc == last_fc then
-        dead_fc = dead_fc + 1
-        if dead_fc >= 3 then end_replay() end
-    else
-        dead_fc = 0
-        last_fc = fc
-    end
 end
