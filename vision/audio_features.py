@@ -100,7 +100,7 @@ def _dct(x: np.ndarray, n_coeffs: int) -> np.ndarray:
     return y
 
 
-def _dct_batch(x: np.ndarray, n_coeffs: int) -> np.ndarray:
+def dct_batch(x: np.ndarray, n_coeffs: int) -> np.ndarray:
     """DCT-II for batched input.  x: (N, M) → (N, n_coeffs)."""
     N, M = x.shape
     k = np.arange(n_coeffs, dtype=np.float32)
@@ -112,7 +112,7 @@ def _dct_batch(x: np.ndarray, n_coeffs: int) -> np.ndarray:
 _MEL_FB_CACHE: dict[int, np.ndarray] = {}
 
 
-def _get_mel_filterbank(sample_rate: int = 16000) -> np.ndarray:
+def get_mel_filterbank(sample_rate: int = 16000) -> np.ndarray:
     """Return the (40, FFT_SIZE//2) mel filterbank matrix, lazily cached."""
     if sample_rate not in _MEL_FB_CACHE:
         n_mels = 40

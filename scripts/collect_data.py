@@ -23,7 +23,7 @@ from config import Config
 from data.shard import FLOW_MAX, FLOW_MIN, quantize_flow, write_json
 from model.action_space import bitfield_to_action
 from vision.optical_flow import compute_flow
-from vision.audio_features import _dct_batch, _get_mel_filterbank
+from vision.audio_features import dct_batch, get_mel_filterbank
 from vision.game_state import audio_match_signal
 
 
@@ -93,12 +93,12 @@ def load_audio_features(wav_path: Path, num_frames: int,
     power = mag * mag
 
     # Mel filterbank (matrix multiply)
-    fbank = _get_mel_filterbank(sample_rate)                 # (40, 128)
+    fbank = get_mel_filterbank(sample_rate)                 # (40, 128)
     mel_energies = power @ fbank.T                           # (N, 40)
     log_mel = np.log(mel_energies + 1e-10)
 
     # DCT-II
-    mfccs = _dct_batch(log_mel, 13)                          # (N, 13)
+    mfccs = dct_batch(log_mel, 13)                          # (N, 13)
 
     # Spectral centroid
     freqs = np.fft.rfftfreq(fft_window, 1.0 / sample_rate)[1:]
