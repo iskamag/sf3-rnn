@@ -99,9 +99,8 @@ st-rnn/
 │   └── game_state.py          # Health-bar detection and HUD extraction
 ├── emulator/
 │   ├── input_log.lua          # FBNeo Lua script — logs P1/P2 inputs, health, stun
-│   ├── capture_replay.sh      # Capture single replay or file of IDs (worker-based, parallel-safe)
-│   ├── capture_all.sh         # Parallel batch capture — fans out a list file across workers
-│   └── start_screencast.py    # XDG Desktop Portal screencast helper
+│   ├── recorder.py            # Capture replays — video, audio, inputs (multi-worker)
+│   └── bot_bridge.lua         # FBNeo Lua script — read bot inputs from file
 ├── data/
 │   └── dataset.py             # PyTorch Dataset (shard directories)
 ├── train/
@@ -156,7 +155,7 @@ The last segment (`1777806845400-9194`) is the challenge ID.
 **Single replay:**
 
 ```bash
-./emulator/capture_replay.sh 1777806845400-9194
+./emulator/recorder.py <challenge_id>
 ```
 
 **Batch capture** — create a file with one ID per line (lines starting with `#`
@@ -170,26 +169,29 @@ are ignored), then fan out across parallel workers:
 ```
 
 ```bash
-./emulator/capture_all.sh replay_ids.txt          # 4 workers (default)
-./emulator/capture_all.sh replay_ids.txt 8        # 8 workers
+./emulator/recorder.py replay_ids.txt                # 4 workers (default)
+./emulator/recorder.py replay_ids.txt --workers 8    # 8 workers
 ```
 
-You can also pass the file directly to `capture_replay.sh` to process
-sequentially in a single worker. `capture_all.sh` fans out across worker
-slots, but reliable `input_log.txt` collection still depends on FBNeo
-honouring the per-worker log filename override. If logs collide, fall back to
-single-worker capture. Audio is captured from PipeWire application streams,
-not the microphone.
+Already-captured replays (with `input_log.txt` in their output directory)
+are skipped automatically.
 
 What happens per replay:
-1. `gamescope` launches the emulator with `input_log.lua`
-2. A screencast dialog appears — **accept it**
-3. GStreamer captures the gamescope window as 160×120 GRAY8 raw video
-4. GStreamer captures the emulator audio stream as 8-bit 16 kHz mono WAV
-5. After replay load, the script double-clicks the nested X display to switch
-   FBNeo back to fullscreen
-6. The Lua script writes per-frame P1/P2 CPS3 bitfields, health, hitstun,
-   timer, and wins to `input_log.txt`
+1. A per-worker Wine prefix is cloned from `~/.fightcade-wine`
+2. `gamescope` launches FBNeo with the quark stream URL and `input_log.lua`
+3. The video PipeWire node ID is read directly from gamescope's stderr
+4. The Xwayland display number is also read from gamescope's stderr
+5. After the replay starts, FBNeo is toggled to fullscreen via `xdotool`
+6. GStreamer captures video (160×120 GRAY8, 60 fps) and audio (16 kHz mono U8)
+7. The Lua script writes per-frame inputs and game state to `input_log.txt`
+8. Replay end is detected by log growth stalling (8 s) or REPLAY_END marker
+9. The emulator is killed (process-group SIGKILL + wineserver -k), log is saved
+
+Each worker reuses its Wine prefix across replays.  Workers are isolated via
+`start_new_session` and per-worker Wine prefixes (`~/.fightcade-wine-replay-{0,1,…}`).
+
+Audio is captured from the wine process's PipeWire stream, matched by
+descendant PID.  Video comes from gamescope's PipeWire node.
 
 Output in `data/captures/<challenge_id>/`:
 ```
@@ -201,7 +203,7 @@ input_log.txt   — "frame p1bits p2bits p1hp p2hp p1stun p2stun timer p1wins p2
 Repeat for many replays — different players, characters, skill levels.
 Aim for at least 50–100 matches for BC training to be useful.
 
-To create a shorter 1-second match-start cue sample:
+For a 1-second match-start cue sample:
 ```bash
 ffmpeg -y -i hmm_16k.wav -t 1.0 -c:a copy hmm_16k_1s.wav
 ```

@@ -200,30 +200,27 @@ _stop_recorders() {
 
 _terminate_emulator_processes() {
     if [ -n "$CURRENT_EMU_PID" ]; then
-        kill -TERM -- "-$CURRENT_EMU_PID" 2>/dev/null || kill "$CURRENT_EMU_PID" 2>/dev/null || true
-        sleep 1
-
-        local pid
-        for pid in $(_descendant_pids "$CURRENT_EMU_PID"); do
-            [ "$pid" = "$CURRENT_EMU_PID" ] && continue
-            kill "$pid" 2>/dev/null || true
-        done
-
-        kill -KILL -- "-$CURRENT_EMU_PID" 2>/dev/null || kill -KILL "$CURRENT_EMU_PID" 2>/dev/null || true
+        # Process-group SIGKILL kills gamescope, wine, and all children.
+        kill -KILL -- "-$CURRENT_EMU_PID" 2>/dev/null || true
+        sleep 0.5
+        kill -KILL "$CURRENT_EMU_PID" 2>/dev/null || true
         wait "$CURRENT_EMU_PID" 2>/dev/null || true
     fi
 
     CURRENT_EMU_PID=""
 }
 
-# Kill winedevice.exe processes belonging to *this* prefix only.
-# Parallel-safe: other workers have their own WINEPREFIX.
-_kill_own_winedevice() {
-    for wpid in $(pgrep -f winedevice.exe 2>/dev/null || true); do
-        local penv
+# Kill all Wine processes belonging to this WINEPREFIX.
+_kill_own_wine() {
+    WINEPREFIX="$WINE_PFX" wineserver -k 2>/dev/null || true
+    sleep 0.5
+
+    local wpid penv
+    for wpid in $(pgrep -f "wineserver\|winedevice\|fcadefbneo" 2>/dev/null || true); do
+        [ -r "/proc/$wpid/environ" ] || continue
         penv=$(tr '\0' '\n' < "/proc/$wpid/environ" 2>/dev/null | grep "^WINEPREFIX=" | head -n 1)
         if [ "$penv" = "WINEPREFIX=$WINE_PFX" ]; then
-            kill "$wpid" 2>/dev/null || true
+            kill -KILL "$wpid" 2>/dev/null || true
         fi
     done
 }
@@ -433,30 +430,47 @@ capture_one() {
         head -c 300 "$gst_err"
     fi
 
-    # Wait for emulator to exit, or kill it when Lua writes REPLAY_END.
+    # Wait for replay to finish.
+    # Primary detection: log file stops growing (Lua can't write after
+    # the quark stream ends).  Fast path: REPLAY_END marker from Lua.
     _wait_emu_done() {
         local pid="$1"
         local log_path="$2"
+        local prev_size=-1
+        local stall=0
 
         while kill -0 "$pid" 2>/dev/null; do
             sleep 2
 
-            kill -0 "$pid" 2>/dev/null || break
-
+            # Fast path: REPLAY_END marker written by Lua callback.
             if [ -f "$log_path" ] && grep -q "REPLAY_END" "$log_path" 2>/dev/null; then
-                echo "  replay-end marker detected — stopping emulator"
-                kill "$pid" 2>/dev/null || true
-                sleep 1
-                break
+                echo "  replay-end marker detected"
+                return
+            fi
+
+            # Primary: log file size stalls = replay done.
+            local size
+            size=$(stat -c%s "$log_path" 2>/dev/null || echo 0)
+            if [ "$size" -gt 0 ] && [ "$size" -eq "$prev_size" ]; then
+                stall=$((stall + 1))
+                if [ "$stall" -ge 4 ]; then
+                    echo "  log stalled (${size} bytes) — replay done"
+                    return
+                fi
+            else
+                stall=0
+                prev_size="$size"
             fi
         done
+
+        echo "  emulator exited"
     }
 
     _wait_emu_done "$emu_pid" "$(_current_input_log_path)"
 
     _stop_recorders
     _terminate_emulator_processes
-    _kill_own_winedevice
+    _kill_own_wine
 
     # Save input log.
     _copy_input_log
@@ -468,14 +482,15 @@ capture_one() {
 _cleanup() {
     echo ""
     echo "Cleaning up …"
+    _stop_recorders
     _copy_input_log
     _terminate_emulator_processes
-    _kill_own_winedevice
+    _kill_own_wine
     rm -f "$EMU_LOG_PATH"
     exec {_lock_fd}>&- 2>/dev/null || true
     rm -rf "$TMPDIR"
 }
-trap _cleanup EXIT
+trap _cleanup EXIT INT TERM
 
 # ---- Main loop ----
 FAILED=0

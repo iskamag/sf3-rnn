@@ -23,12 +23,17 @@ CAPTURE="$SCRIPT_DIR/capture_replay.sh"
 [ -x "$CAPTURE" ] || { echo "ERROR: $CAPTURE not found"; exit 1; }
 [ -f "$IDS_FILE" ] || { echo "ERROR: $IDS_FILE not found"; exit 1; }
 
-# Read and clean IDs.
+# Read and clean IDs, skip already captured.
 IDS=()
 while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="${line//[$'\t\r ']}"
-    [ -n "$line" ] && IDS+=("$line")
+    [ -n "$line" ] || continue
+    if [ -f "data/captures/$line/input_log.txt" ]; then
+        echo "SKIP $line (already captured)"
+        continue
+    fi
+    IDS+=("$line")
 done < "$IDS_FILE"
 
 N="${#IDS[@]}"
@@ -56,6 +61,23 @@ for ((w = 0; w < WORKERS; w++)); do
     ST_RNN_WORKERS="$WORKERS" "$CAPTURE" "$tmp" "$GAME" &
     PIDS+=($!)
 done
+
+# ---- Signal handler: kill all workers on Ctrl+C ----
+_terminate_workers() {
+    echo ""
+    echo "Terminating workers …"
+    for pid in "${PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    sleep 1
+    for pid in "${PIDS[@]}"; do
+        kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+    rm -f /tmp/st_rnn_worker_locks/slot_*
+    exit 130
+}
+trap _terminate_workers INT TERM
 
 # Wait and report.
 FAILED=0
