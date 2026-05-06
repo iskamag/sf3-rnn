@@ -92,9 +92,6 @@ class PPOTrainer:
         self._rollout_motor_buf: Optional[OutputDelayBuffer] = None
         self._rollout_traj: list[Transition] = []
 
-        self.use_amp = cfg.use_amp and self.device.type == "cuda"
-        self.amp_dtype = torch.float16 if cfg.amp_dtype == "float16" else torch.bfloat16
-
         # Audio pipeline
         self._audio_buf: Optional[AudioBuffer] = None
         if cfg.use_audio:
@@ -317,16 +314,11 @@ class PPOTrainer:
             if cfg.use_audio:
                 kw["audio"] = audio_chunked[:, t_step:t_step + 1]
 
-            with torch.amp.autocast(
-                device_type=device.type,
-                dtype=self.amp_dtype,
-                enabled=self.use_amp,
-            ):
-                out = self.agent.evaluate_stride(
-                    f_in, ego, hidden=hidden, context=context,
-                    prev_actions=prev_actions[:, t_step:t_step + 1],
-                    **kw,
-                )
+            out = self.agent.evaluate_stride(
+                f_in, ego, hidden=hidden, context=context,
+                prev_actions=prev_actions[:, t_step:t_step + 1],
+                **kw,
+            )
             hidden = out["hidden"]
             context = out["context"]
 
