@@ -64,8 +64,8 @@ the model's own softmax/sigmoid.
 | **Total visual reaction**   | 200 ms    | 12 frm  | —                   |
 
 Audio reaches consciousness ~3× faster than vision; it gets its own shorter
-buffer.  The `MatchContext` (64-d GRU) accumulates an opponent profile across
-the full match from optical flow alone.
+buffer.  The `MatchContext` (2×128-d stacked GRU) accumulates an opponent
+profile across the full match from optical flow alone.
 
 ### Model detail
 
@@ -74,7 +74,7 @@ the full match from optical flow alone.
 - **minGRU**: 2 layers, hidden=512, dropout=0.1, runs once per N=4 frames
 - **minGRU input**: 256 (pooled flow) + 64 (audio) + 128 (context) + 1 (ego) + 64 (prev-actions) = 513-d (with audio)
 - **Action decoder**: learned sub-frame position embedding `(N, 512)` broadcast onto hidden → shared MLP → N independent (movement, buttons, value) sets per step
-- **MatchContext**: stacked GRUCell (2 layers, 128-d), persisted across BC segments — multi-layer for richer opponent profiling
+- **MatchContext**: stacked GRUCell (2 layers, 128-d), updated at each stride and persisted across BC segments and full PPO episodes
 - **Action space**: multi-head — categorical (9 directions) + multi-label (6 buttons)
 - **Value head**: merged into the per-slot action decoder; scalar per frame
 - **ego_player**: single scalar (0=P1, 1=P2) concatenated into minGRU input
@@ -89,24 +89,25 @@ st-rnn/
 ├── model/
 │   ├── action_space.py        # Direction / Button enums, CPS3 bitfield codec
 │   ├── rnn.py                 # FlowCNN + AudioMLP + MatchContext → minGRU
+│   ├── agent.py               # CleanRL-style agent: stride-N rollout + teacher-forced evaluation
 │   ├── context.py             # MatchContext GRU (opponent profiling)
 │   ├── reaction_buffer.py     # Visual sensory-lag frame buffer
 │   ├── audio_buffer.py        # Audio sensory-lag buffer
 │   └── output_buffer.py       # Motor-lag action buffer
 ├── vision/
-│   ├── optical_flow.py        # Farneback flow computation
+│   ├── optical_flow.py        # Farneback flow computation, preprocess, clip
 │   ├── audio_features.py      # MFCC + RMS + spectral centroid (256-pt FFT)
-│   └── game_state.py          # Health-bar detection and HUD extraction
+│   └── game_state.py          # Audio-template match detection for BC shard splitting
 ├── emulator/
 │   ├── input_log.lua          # FBNeo Lua script — logs P1/P2 inputs, health, stun
 │   ├── recorder.py            # Capture replays — video, audio, inputs (multi-worker, timer-based)
 │   └── bot_bridge.lua         # FBNeo Lua script — read bot inputs from file
 ├── data/
-│   └── dataset.py             # PyTorch Dataset (shard directories)
+│   ├── dataset.py             # PyTorch Dataset (shard directories)
+│   └── shard.py               # Flow quantisation helpers
 ├── train/
 │   ├── bc.py                  # Behaviour cloning trainer
-│   ├── ppo.py                 # PPO trainer + rollout buffer
-│   └── reward.py              # Health-delta reward + GAE
+│   └── ppo.py                 # PPO trainer (CleanRL-style, multi-epoch, value clipping)
 └── scripts/
     ├── train.sh               # Unified CLI wrapper
     ├── collect_data.py        # Capture → shard pipeline
@@ -269,7 +270,10 @@ Logs at `logs/bc/` (view with `tensorboard --logdir logs`).
 ### 5. PPO fine-tuning
 
 Fine-tune the BC policy with self-play or environment interaction.
-The reward is fully screen-observable — no emulator memory hooks needed.
+Reward is computed from CPS3 memory values (health, wins) read by the
+Lua bridge each frame.  The audio pipeline is managed inside the trainer;
+motor lag (`OutputDelayBuffer`) decouples the stored (action, logprob,
+value) from the executed action so reward alignment is correct.
 
 ```bash
 ./scripts/train.sh ppo
@@ -281,7 +285,7 @@ Pass a specific BC checkpoint when needed:
 ./scripts/train.sh ppo checkpoints/bc_epoch099.pt
 ```
 
-**Reward function:**
+**Reward function** (read from CPS3 memory via Lua bridge):
 
 ```
 reward = health_delta * (damage_dealt − damage_taken)
@@ -290,10 +294,10 @@ reward = health_delta * (damage_dealt − damage_taken)
        − idle_penalty
 ```
 
-The dual-buffer latency pipeline is active during rollout: visual lag
-8 frames, audio lag 3 frames, motor lag 4 frames.  Logged transitions
-use the total-delay flow so the PPO update sees correctly aligned
-`(state, action, reward)` tuples.
+The update replays each trajectory in stride-N windows with full hidden-state
+propagation, so gradients flow through time across the minGRU and MatchContext.
+Multiple PPO epochs per batch with per-trajectory shuffling.  Value loss uses
+SB3/CleanRL-style clipping.
 
 Checkpoints saved to `checkpoints/ppo_stepNNNNNN.pt`.
 Logs at `logs/ppo/`.
@@ -310,19 +314,16 @@ Start TensorBoard with:
 python scripts/run_bot.py --ckpt checkpoints/ppo_step001000.pt
 ```
 
-Requires a running SF3 instance.  The bot captures frames and audio,
-delays them through the reaction buffers, runs the minGRU, delays the
-output through the motor buffer, and injects inputs.
+Manual start/stop — the bot captures frames and audio, runs them through
+the full latency pipeline (sensory buffers, stride-N accumulation, motor
+buffer), and injects inputs.  No menu navigation or health-bar detection;
+turn the bot on when already in-game.
 
 Override latency:
 
 ```bash
 python scripts/run_bot.py --ckpt ... --sensory-lag 8 --motor-lag 4
 ```
-
-Between matches the bot detects character-select by watching for
-health-bar absence and navigates via `char_select_seq` in `config.py`.
-The minGRU hidden state and match context are reset at each new match.
 
 ## Configuration
 
@@ -340,20 +341,24 @@ All tunables in `config.py`:
 | `frame_height`         | 120     | Raw video frame height (capture)     |
 | `flow_width`           | 160     | Optical-flow output width (model input) |
 | `flow_height`          | 120     | Optical-flow output height (model input) |
-| `match_start_offset_frames` | 20 | Frames skipped after the start cue   |
 | `cnn_channels`         | 16      | FlowCNN base channels (8/12/16/24/32) |
 | `compile_model`        | True    | torch.compile the model              |
-| `context_dim`          | 64      | MatchContext opponent-profile size   |
+| `context_dim`          | 128     | MatchContext opponent-profile size   |
 | `action_embed_dim`     | 64      | Prev-action embedding dimension      |
 | `feature_dim`          | 256     | Visual feature dimension             |
 | `audio_dim`            | 64      | Audio embedding dimension            |
 | `mingru_hidden`        | 512     | minGRU hidden size                   |
 | `mingru_layers`        | 2       | minGRU depth                         |
 | `seq_len`              | 96      | BC training segment length (frames)  |
-| `lr`                   | 1e-4    | Learning rate                        |
+| `lr`                   | 1e-4    | AdamW learning rate (non-Muon params)|
+| `muon_lr`              | 2e-3    | Muon learning rate (matrix params)   |
+| `ppo_updates`          | 10      | PPO epochs per batch of trajectories |
 | `ppo_clip_eps`         | 0.2     | PPO clip epsilon                     |
-| `ppo_seq_len`          | 128     | PPO recurrent update chunk length    |
-| `ppo_minibatch`        | 256     | PPO target timesteps per update      |
+| `gamma`                | 0.99    | Discount factor                      |
+| `gae_lambda`           | 0.95    | GAE trace decay                      |
+| `ent_coef`             | 0.01    | Entropy bonus coefficient            |
+| `vf_coef`              | 0.5     | Value loss coefficient               |
+| `max_grad_norm`        | 0.5     | Global gradient clipping             |
 
 ## CPS3 input bitfield
 
@@ -378,9 +383,8 @@ when P2's combo counter is non-zero (P2 is hitting P1), and vice versa.
   backbone) — flow fields are 2-channel and cheap to process.
 - BC trains on diverse player data — the model learns general SF3
   competency, not to mimic a single player.
-- PPO reward is screen-observable via HUD ROIs on 384×224 frames; during
-  offline capture health/stun is read directly from CPS3 memory by the Lua
-  script, so the training data is ground-truth accurate.
-- The MatchContext GRU gives the minGRU a persistent 64-d opponent profile
+- During offline capture health/stun is read from CPS3 memory by the Lua
+  script; training data is ground-truth accurate.
+- The MatchContext GRU gives the minGRU a persistent 128-d opponent profile
   that survives BC segment boundaries and full PPO episodes.
 - Audio features use a manual 256-point DCT-II (no scipy dependency).
