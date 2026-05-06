@@ -147,6 +147,7 @@ class SF3RNN(nn.Module):
         self.encoder = _FlowEncoder(feature_dim, cnn_channels)
 
         # Per-frame action embedder
+        self.action_embed_dim = action_embed_dim
         self._action_embed = nn.Sequential(
             nn.Linear(self.action_dim, action_embed_dim),
             nn.ReLU(),
@@ -231,7 +232,7 @@ class SF3RNN(nn.Module):
     def _encode_prev_actions_fallback(self, B: int, T: int, device: torch.device
                                       ) -> torch.Tensor:
         """Zero-initialised prev-action encoding when no prior is available."""
-        return torch.zeros(B, T, self._action_embed[-1].out_features,
+        return torch.zeros(B, T, self.action_embed_dim,
                            device=device)
 
     # ------------------------------------------------------------------

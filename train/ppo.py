@@ -252,9 +252,8 @@ class PPOTrainer:
         dones = torch.tensor([t.done for t in traj], dtype=torch.bool, device=device)
 
         if cfg.use_audio:
-            feat_dim = self.agent.model.audio_encoder.net[0].in_features
             audio_ft = torch.stack([
-                t.audio if t.audio is not None else torch.zeros(feat_dim)
+                t.audio if t.audio is not None else torch.zeros(cfg.audio_feat_dim)
                 for t in traj
             ]).to(device)
 
