@@ -27,16 +27,22 @@ class MatchContext(nn.Module):
             self.cells.append(nn.GRUCell(in_dim, context_dim))
 
     def forward(self,
-                recurrent_out: torch.Tensor,                   # (B, H)
+                recurrent_out: torch.Tensor,                   # (B, T, H) or (B, H)
                 prev_context: torch.Tensor,                    # (L, B, C)
                 ) -> torch.Tensor:                             # (L, B, C)
-        """Update the match profile with one timestep of recurrent output."""
-        new_ctx = []
-        x = recurrent_out
-        for i, cell in enumerate(self.cells):
-            x = cell(x, prev_context[i])
-            new_ctx.append(x)
-        return torch.stack(new_ctx, dim=0)
+        """Update the match profile across one or more recurrent timesteps."""
+        if recurrent_out.dim() == 2:
+            recurrent_out = recurrent_out.unsqueeze(1)
+
+        context = prev_context
+        for t in range(recurrent_out.shape[1]):
+            next_ctx = []
+            x = recurrent_out[:, t]
+            for i, cell in enumerate(self.cells):
+                x = cell(x, context[i])
+                next_ctx.append(x)
+            context = torch.stack(next_ctx, dim=0)
+        return context
 
     def initial_context(self, batch_size: int,
                         device: torch.device) -> torch.Tensor:

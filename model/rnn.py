@@ -292,7 +292,7 @@ class SF3RNN(nn.Module):
         slot_in = self._action_proj(h_exp)                             # (B, T, N, H)
 
         # --- update context ---
-        full_ctx = self.match_context(recurrent_out[:, -1], full_ctx)
+        full_ctx = self.match_context(recurrent_out, full_ctx)
 
         return {
             "movement": self.movement_head(slot_in),                   # (B, T, N, 9)
