@@ -83,6 +83,7 @@ def preprocess_flow(flow: np.ndarray,
                          (target_width, target_height),
                          interpolation=cv2.INTER_LINEAR)
     out = resized.transpose(2, 0, 1) / norm_factor
+    out = np.clip(out, -1.0, 1.0)
     return torch.from_numpy(out.astype(np.float32))
 
 
