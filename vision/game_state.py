@@ -114,20 +114,10 @@ def read_super(bar: np.ndarray) -> float:
 # High-level extraction
 # ---------------------------------------------------------------------------
 
-def has_health_bar(frame: np.ndarray, roi: dict,
-                   threshold: float = 0.08) -> bool:
-    """Quick check — are health bars visible on this frame?  True during
-    gameplay, False during character select, intros, and victory screens."""
-    def crop(r):
-        x, y, w, h = r
-        return frame[y:y + h, x:x + w]
-    p1 = read_health(crop(roi["p1_health"]))
-    p2 = read_health(crop(roi["p2_health"]))
-    return (p1 > threshold) and (p2 > threshold)
-
-
 # ---------------------------------------------------------------------------
 # Audio-based match detection — cross-correlates a template .wav against
+# captured audio to find match boundaries (used for BC data collection).
+# ---------------------------------------------------------------------------
 # captured audio to find match boundaries without any video or health logic.
 # ---------------------------------------------------------------------------
 

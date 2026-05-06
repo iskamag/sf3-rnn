@@ -291,3 +291,44 @@ class SF3Env(gym.Env):
             offset = (h - new_h) // 2
             raw = raw[offset:offset + new_h, :]
         return cv2.resize(raw, (target_w, target_h))
+
+
+class MssScreenEnv:
+    """Minimal screen-capture environment for ``scripts/run_bot.py``.
+
+    No reward computation, no latency buffers — just captures the game
+    window and sends inputs via the Lua bridge.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self._mss = None
+        self._input_path = Path(cfg.fbneo_input_path)
+
+    def reset(self) -> np.ndarray:
+        import mss
+        self._mss = mss.mss()
+        return self._capture()
+
+    def step(self, direction: Direction, buttons: list[Button]) -> tuple:
+        bits = action_to_bitfield(direction, buttons)
+        self._input_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._input_path.with_suffix(self._input_path.suffix + ".tmp")
+        tmp.write_text(f"{bits}\n")
+        tmp.replace(self._input_path)
+        frame = self._capture()
+        return frame, 0.0, False, False, {}
+
+    def close(self):
+        if self._mss is not None:
+            self._mss.close()
+            self._mss = None
+
+    def _capture(self) -> np.ndarray:
+        import mss
+        if self._mss is None:
+            self._mss = mss.mss()
+        monitor = {"top": 0, "left": 0, "width": 1280, "height": 960}
+        img = np.array(self._mss.grab(monitor))
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        return SF3Env._resize_frame(img, self.cfg.native_height, self.cfg.native_width)
