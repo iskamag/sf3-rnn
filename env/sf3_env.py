@@ -103,6 +103,8 @@ class SF3Env(gym.Env):
               ) -> tuple[np.ndarray, dict]:
         super().reset(seed=seed)
         import mss
+        if self._mss is not None:
+            self._mss.close()
         self._mss = mss.mss()
 
         device_str = self.cfg.device if torch.cuda.is_available() else "cpu"
