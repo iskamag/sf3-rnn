@@ -1,15 +1,17 @@
 """SF3 environment for Fightcade FBNeo — gymnasium interface.
 
-The environment models sensory lag (ReactionBuffer delays observations).
-Motor lag is handled externally by the training loop so that the stored
-(log_prob, action, reward) triples remain properly aligned.
+The environment reads actual game state (health, wins) from the FBNeo Lua
+bridge instead of peeping at pixels.  Reward is computed from real memory
+values: damage dealt/taken per step, round/match win bonuses, and a bonus
+for remaining health when winning a round.
 
-Screen frames are captured with mss. Inputs are sent through the FBNeo Lua
-bridge by writing CPS3 bitfields to a command file.
+Sensory lag (ReactionBuffer) lives in the env; motor lag lives in the
+training loop so that stored (action, log_prob, reward) triples align.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -22,37 +24,55 @@ from gymnasium import spaces
 from config import Config
 from model.action_space import Direction, Button, action_to_bitfield
 from model.reaction_buffer import ReactionBuffer
-from train.reward import compute_step_reward, RewardConfig
-from vision.game_state import (
-    extract_game_state, GameState, WinTracker, has_health_bar,
-)
+
+
+@dataclass
+class GameState:
+    """Canonical game state from the Lua bridge."""
+    p1_health: float = 0.0
+    p2_health: float = 0.0
+    p1_wins: int = 0
+    p2_wins: int = 0
+    p1_stun: int = 0
+    p2_stun: int = 0
+    timer: int = 0
+
+    @staticmethod
+    def parse(line: str) -> GameState:
+        parts = line.strip().split()
+        if len(parts) < 7:
+            return GameState()
+        return GameState(
+            p1_health=float(parts[0]),
+            p2_health=float(parts[1]),
+            p1_wins=int(parts[2]),
+            p2_wins=int(parts[3]),
+            p1_stun=int(parts[4]),
+            p2_stun=int(parts[5]),
+            timer=int(parts[6]),
+        )
+
+
+_IN_MENU = GameState()
 
 
 class SF3Env(gym.Env):
-    """Gymnasium environment wrapping Fightcade FBNeo screen capture.
+    """Gymnasium environment wrapping Fightcade FBNeo.
 
-    ``step(action)`` immediately sends *action* to the emulator.  The
-    returned observation is a delayed optical-flow frame from the
-    ReactionBuffer (sensory lag).  Reward is computed from health-bar
-    pixel analysis.
+    ``step(action)`` sends the motor-delayed action to the emulator, reads
+    actual game state from the Lua bridge, and returns a reward based on
+    real health delta, round/match wins, and remaining health.
+
+    The observation is a delayed optical-flow frame from the ReactionBuffer
+    (sensory lag).  The screen is still captured for flow, but reward does
+    NOT depend on pixel-peeping.
     """
 
-    def __init__(
-        self,
-        cfg: Config,
-        monitor: dict | None = None,
-        reward_cfg: RewardConfig | None = None,
-    ):
+    def __init__(self, cfg: Config, monitor: dict | None = None):
         super().__init__()
         self.cfg = cfg
         self.monitor = monitor or {"top": 0, "left": 0, "width": 1280, "height": 960}
         self._p1 = True
-        self._reward_cfg = reward_cfg or RewardConfig(
-            health_delta=cfg.reward_health_delta,
-            round_win=cfg.reward_round_win,
-            match_win=cfg.reward_match_win,
-            idle=cfg.reward_idle_penalty,
-        )
 
         # ── spaces ──────────────────────────────────────────────────────
         self.observation_space = spaces.Box(
@@ -60,26 +80,20 @@ class SF3Env(gym.Env):
             shape=(2, cfg.frame_height, cfg.frame_width),
             dtype=np.float32,
         )
-        # Action received here is the *motor-delayed* action (already through
-        # OutputDelayBuffer), not the raw policy output.
         self.action_space = spaces.MultiDiscrete([9, 2, 2, 2, 2, 2, 2])
 
         # ── sensory lag ─────────────────────────────────────────────────
         self._sensory_buf: ReactionBuffer | None = None
 
-        # ── screen capture ──────────────────────────────────────────────
+        # ── screen capture / Lua bridge ─────────────────────────────────
         self._mss: Optional["mss.mss"] = None
         self._input_path = Path(cfg.fbneo_input_path)
+        self._state_path = Path(cfg.fbneo_state_path)
 
-        # ── health / reward tracking ────────────────────────────────────
-        self._prev_gs: Optional[GameState] = None
-        self._win_tracker = WinTracker()
-        self._roi = {
-            "p1_health": cfg.p1_health_roi,
-            "p2_health": cfg.p2_health_roi,
-            "p1_stun":   cfg.p1_stun_roi,
-            "p2_stun":   cfg.p2_stun_roi,
-        }
+        # ── reward tracking ─────────────────────────────────────────────
+        self._prev_hp_self: float = 1.0
+        self._prev_hp_opp: float = 1.0
+        self._prev_wins_self: int = 0
 
     # ------------------------------------------------------------------
     # gymnasium interface
@@ -100,20 +114,20 @@ class SF3Env(gym.Env):
             flow_norm=self.cfg.flow_norm,
             device=device_str,
         )
-        self._prev_gs = None
-        self._win_tracker = WinTracker()
+
+        self._prev_hp_self = 1.0
+        self._prev_hp_opp = 1.0
+        self._prev_wins_self = 0
 
         # Navigate menus until gameplay starts.
-        frame = self._navigate_menu()
+        self._navigate_menu()
 
-        # Prime the reaction buffer so get_flow() returns a valid result.
+        # Prime the reaction buffer.
         prime_frames = self.cfg.sensory_lag_frames + 2
+        frame = self._capture()
         for _ in range(prime_frames):
             self._sensory_buf.add_frame(frame)
             frame = self._capture()
-
-        # Initial health state.
-        self._prev_gs = self._win_tracker.update(extract_game_state(frame, self._roi))
 
         # First valid (delayed) observation.
         obs = self._sensory_buf.get_flow()
@@ -128,43 +142,42 @@ class SF3Env(gym.Env):
              ) -> tuple[np.ndarray, float, bool, bool, dict]:
         """Execute *action* and return (obs, reward, terminated, truncated, info).
 
-        *action* is the motor-delayed action (direction + 6 buttons) —
-        the training loop applies OutputDelayBuffer before calling step().
-        The observation is the delayed optical flow from the ReactionBuffer.
+        *action* is the motor-delayed action.  Reward is computed from actual
+        game state read from the Lua bridge — no pixel-peeping.
         """
         dir_int = int(action[0])
         buttons = [Button(i) for i in range(6) if action[i + 1] == 1]
 
         # Send the (already delayed) action to the emulator.
         if dir_int != 0 or buttons:
-            d = Direction(dir_int)
-            self._send_input(d, buttons)
+            self._send_input(Direction(dir_int), buttons)
         else:
             self._send_input(Direction.NEUTRAL, [])
 
-        # Capture frame and push through sensory delay.
+        # Capture frame for optical flow observation.
         frame = self._capture()
         self._sensory_buf.add_frame(frame)
 
+        # Read actual game state from Lua bridge.
+        gs = self._read_state()
+
+        # Compute reward from real values.
+        reward = self._compute_reward(gs, bool(dir_int != 0 or buttons))
+
+        # Sensory-delayed flow observation.
         obs_flow = self._sensory_buf.get_flow()
         if obs_flow is not None:
             obs = obs_flow.squeeze().cpu().numpy()
         else:
             obs = np.zeros((2, self.cfg.frame_height, self.cfg.frame_width), dtype=np.float32)
 
-        # Reward from health-delta between frames.
-        curr_gs = self._win_tracker.update(extract_game_state(frame, self._roi))
-        any_button = bool(dir_int != 0 or len(buttons) > 0)
-        reward = compute_step_reward(
-            self._prev_gs, curr_gs, self._p1, self._reward_cfg, any_button,
-        ) if self._prev_gs is not None else 0.0
-        self._prev_gs = curr_gs
-
-        # Match over when health bars disappear (back to menu).
-        terminated = not has_health_bar(frame, self._roi)
+        # Terminate when health is gone → back to menu.
+        terminated = self._is_menu(gs)
         truncated = False
 
         return obs, reward, terminated, truncated, {}
+
+    # ------------------------------------------------------------------
 
     def render(self):
         pass
@@ -173,6 +186,54 @@ class SF3Env(gym.Env):
         if self._mss is not None:
             self._mss.close()
             self._mss = None
+
+    # ------------------------------------------------------------------
+    # reward
+    # ------------------------------------------------------------------
+
+    def _compute_reward(self, gs: GameState, any_button: bool) -> float:
+        cfg = self.cfg
+        if self._p1:
+            hp_self, hp_opp = gs.p1_health, gs.p2_health
+            wins_self = gs.p1_wins
+        else:
+            hp_self, hp_opp = gs.p2_health, gs.p1_health
+            wins_self = gs.p2_wins
+
+        dmg_dealt = max(0.0, self._prev_hp_opp - hp_opp)
+        dmg_taken = max(0.0, self._prev_hp_self - hp_self)
+        rounds_won = max(0, wins_self - self._prev_wins_self)
+        match_won = 1 if wins_self >= 2 and self._prev_wins_self < 2 else 0
+
+        reward = cfg.reward_health_delta * (dmg_dealt - dmg_taken)
+        reward += cfg.reward_round_win * rounds_won
+        reward += cfg.reward_match_win * match_won
+        if rounds_won > 0:
+            reward += cfg.reward_remaining_health * hp_self
+        reward += cfg.reward_idle_penalty if not any_button else 0.0
+
+        self._prev_hp_self = hp_self
+        self._prev_hp_opp = hp_opp
+        self._prev_wins_self = wins_self
+        return reward
+
+    # ------------------------------------------------------------------
+    # Lua bridge state file
+    # ------------------------------------------------------------------
+
+    def _read_state(self) -> GameState:
+        try:
+            text = self._state_path.read_text().strip()
+            if not text:
+                return GameState()
+            return GameState.parse(text)
+        except (FileNotFoundError, OSError, ValueError, IndexError):
+            return GameState()
+
+    @staticmethod
+    def _is_menu(gs: GameState) -> bool:
+        """Return True if we are at the menu / character select (not in gameplay)."""
+        return gs.p1_health < 0.05 and gs.p2_health < 0.05
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -190,44 +251,32 @@ class SF3Env(gym.Env):
         tmp.write_text(f"{bits}\n")
         tmp.replace(self._input_path)
 
-    def _navigate_menu(self) -> np.ndarray:
-        """Send menu-navigation actions until health bars are visible.
-
-        Returns the last captured frame.
-        """
+    def _navigate_menu(self):
+        """Send menu-navigation actions until the Lua bridge reports gameplay."""
         seq = self.cfg.char_select_seq
-        post_stall = self.cfg.post_match_stall
-        menu_detect = self.cfg.menu_detect_frames
-
-        for _ in range(post_stall):
+        for _ in range(self.cfg.post_match_stall):
             self._send_input(Direction.NEUTRAL, [])
             self._capture()
-
-        health_seen = 0
-        last_frame = None
 
         for direction_name, button_names, hold in seq:
             d = getattr(Direction, direction_name.upper())
             b = [getattr(Button, n.upper()) for n in button_names]
             for _ in range(hold):
                 self._send_input(d, b)
-                last_frame = self._capture()
-                if has_health_bar(last_frame, self._roi):
-                    health_seen += 1
-                else:
-                    health_seen = 0
+                self._capture()
 
-        for _ in range(menu_detect):
+        # Wait until health is visible.
+        health_seen = 0
+        for _ in range(self.cfg.menu_detect_frames):
             self._send_input(Direction.NEUTRAL, [])
-            last_frame = self._capture()
-            if has_health_bar(last_frame, self._roi):
+            self._capture()
+            gs = self._read_state()
+            if not self._is_menu(gs):
                 health_seen += 1
                 if health_seen >= 6:
                     break
             else:
                 health_seen = 0
-
-        return last_frame
 
     @staticmethod
     def _resize_frame(raw: np.ndarray, target_h: int, target_w: int) -> np.ndarray:

@@ -101,6 +101,7 @@ class Config:
     reward_health_delta: float = 1.0     # damage dealt – damage taken per step
     reward_round_win: float = 10.0       # bonus for winning a round
     reward_match_win: float = 50.0       # bonus for winning the match
+    reward_remaining_health: float = 2.0 # per-point of remaining health when winning a round
     reward_idle_penalty: float = -0.01   # small penalty for no inputs
 
     # --- Character select (inference only) ---
@@ -120,6 +121,9 @@ class Config:
     # emulator/bot_bridge.lua reads this file once per frame and applies P1 input.
     fbneo_input_path: Path = field(
         default_factory=lambda: Path.home() / "fightcade-emu" / "bot_input.txt")
+    # bot_bridge.lua writes game state here after each frame.
+    fbneo_state_path: Path = field(
+        default_factory=lambda: Path.home() / "fightcade-emu" / "bot_state.txt")
 
     # --- Paths ---
     data_dir: Path = field(default_factory=lambda: Path("data"))
