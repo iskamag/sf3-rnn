@@ -135,6 +135,7 @@ class SF3RNN(nn.Module):
         self.mingru_hidden = mingru_hidden
         self.mingru_layers = mingru_layers
         self.use_audio = use_audio
+        self.audio_feat_dim = audio_feat_dim
         self.context_dim = context_dim
         self.context_layers = context_layers
         self.num_directions = num_directions
@@ -317,7 +318,7 @@ class SF3RNN(nn.Module):
         device = flows.device
 
         if self.use_audio and audio_feats is None:
-            audio_feats = torch.zeros((B, self.N, self.audio_encoder.net[0].in_features),
+            audio_feats = torch.zeros((B, self.N, self.audio_feat_dim),
                                       device=device)
         audio = audio_feats.unsqueeze(1) if audio_feats is not None else None   # (B, 1, N, 15)
 
