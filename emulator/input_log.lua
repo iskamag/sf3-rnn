@@ -5,7 +5,11 @@
 --   <frame> <p1_bits> <p2_bits> <p1_hp> <p2_hp> <p1_stun> <p2_stun> <timer> <p1_wins> <p2_wins> <reset>
 
 local out_path = os.getenv("ST_RNN_INPUT_LOG") or "input_log.txt"
-local out = io.open(out_path, "w")
+-- Binary mode + explicit CRLF: wine's text-mode fwrite/fflush miscalculates
+-- the physical file offset across \n->\r\n translation, causing later writes
+-- to overlap earlier ones (dropped \n, garbled frame numbers).  Writing \r\n
+-- ourselves keeps the byte stream identical while sidestepping that path.
+local out = io.open(out_path, "wb")
 if not out then
     print("ERROR: cannot open " .. out_path)
     os.exit(1)
@@ -91,7 +95,7 @@ local function log_frame()
     local timer   = memory.readbyte(ROUND_TIMER)
     local reset = detect_console_reset(p1_bits, p2_bits) and 1 or 0
     update_round_wins(p1_hp, p2_hp, timer)
-    out:write(string.format("%d %d %d %.3f %.3f %d %d %d %d %d %d\n",
+    out:write(string.format("%d %d %d %.3f %.3f %d %d %d %d %d %d\r\n",
         frame, p1_bits, p2_bits, p1_hp, p2_hp, p1_stun, p2_stun, timer, p1_wins, p2_wins, reset))
     out:flush()
     frame = frame + 1

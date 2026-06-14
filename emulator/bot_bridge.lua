@@ -56,7 +56,21 @@ local function apply_p1_bits(bits)
     })
 end
 
+-- Fixed width: %.4f is 6 chars (byte/0xA0 stays < 2.0) and %3d covers the
+-- full 0-255 byte range, so seek(0)+rewrite leaves no trailing bytes from a
+-- longer prior line.  Do NOT relax these without truncation support.
+local STATE_FMT = "%.4f %.4f %3d %3d %3d %3d %3d\n"
+
+-- One persistent handle, rewritten in place each frame.  Binary mode dodges
+-- wine's text-mode fwrite/fflush offset desync (see input_log.lua).  The
+-- reader reopens fresh each call and tolerates the torn-read window.
+local state_out = io.open(STATE_PATH, "wb")
+if not state_out then
+    print("ERROR: cannot open " .. STATE_PATH)
+end
+
 local function write_state()
+    if not state_out then return end
     local p1_hp  = memory.readbyte(P1_HEALTH) / MAX_HEALTH
     local p2_hp  = memory.readbyte(P2_HEALTH) / MAX_HEALTH
     local p1_stun = memory.readbyte(P2_COMBO) ~= 0 and 1 or 0
@@ -64,15 +78,10 @@ local function write_state()
     local timer  = memory.readbyte(ROUND_TIMER)
     local p1_w   = memory.readbyte(P1_WINS)
     local p2_w   = memory.readbyte(P2_WINS)
-
-    local tmp = STATE_PATH .. ".tmp"
-    local f = io.open(tmp, "w")
-    if f then
-        f:write(string.format("%.4f %.4f %d %d %d %d %d\n",
-            p1_hp, p2_hp, p1_w, p2_w, p1_stun, p2_stun, timer))
-        f:close()
-        os.rename(tmp, STATE_PATH)
-    end
+    state_out:seek("set", 0)
+    state_out:write(string.format(STATE_FMT,
+        p1_hp, p2_hp, p1_w, p2_w, p1_stun, p2_stun, timer))
+    state_out:flush()
 end
 
 -- ── main ─────────────────────────────────────────────────────────────

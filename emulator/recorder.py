@@ -17,7 +17,7 @@ from gi.repository import Gst
 Gst.init(None)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-EMU_DIR = Path.home() / "fightcade-emu"
+BASE_EMU_DIR = Path.home() / "fightcade-emu"
 CAPTURES_DIR = PROJECT_DIR / "data" / "captures"
 BASE_WINE_PFX = Path.home() / ".fightcade-wine"
 LUA_SCRIPT = Path(__file__).resolve().parent / "input_log.lua"
@@ -147,14 +147,15 @@ class CaptureError(Exception):
     pass
 
 
-def capture_one(challenge_id: str, game: str, wine_pfx: Path, length: int) -> None:
+def capture_one(challenge_id: str, game: str, wine_pfx: Path, emu_dir: Path,
+                length: int) -> None:
     out = CAPTURES_DIR / challenge_id
     if (out / "input_log.txt").exists() or (out / "video.raw").exists():
         print(f"SKIP {challenge_id} — already captured"); return
     out.mkdir(parents=True, exist_ok=True)
 
-    log = EMU_DIR / "input_log.txt"
-    shutil.copy(LUA_SCRIPT, EMU_DIR / "input_log.lua")
+    log = emu_dir / "input_log.txt"
+    shutil.copy(LUA_SCRIPT, emu_dir / "input_log.lua")
     log.unlink(missing_ok=True)
 
     env = os.environ | {
@@ -188,7 +189,7 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path, length: int) -> No
             dest = out / "input_log.txt"
             shutil.copy(log, dest)
             print(f"  log: {dest.read_text().count(chr(10))} frames")
-        (EMU_DIR / "input_log.lua").unlink(missing_ok=True)
+        (emu_dir / "input_log.lua").unlink(missing_ok=True)
 
     try:
         print(f"--- {challenge_id} ({game}) ---")
@@ -198,7 +199,7 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path, length: int) -> No
         emu = subprocess.Popen(
             ["gamescope", "-W", "640", "-H", "480", "-r", "60", "--",
              "wine", "fcadefbneo.exe", url, "-lua", "input_log.lua"],
-            cwd=EMU_DIR, env=env, stdin=subprocess.DEVNULL,
+            cwd=emu_dir, env=env, stdin=subprocess.DEVNULL,
             start_new_session=True, stderr=subprocess.PIPE)
         print(f"  pid: {emu.pid}")
 
@@ -256,10 +257,14 @@ def capture_chunk(worker_id: int, ids: list[tuple[str, int]], game: str) -> None
     if BASE_WINE_PFX.is_dir() and not (pfx / "drive_c").is_dir():
         print(f"[worker {worker_id}] cloning {pfx}")
         subprocess.run(["cp", "-a", str(BASE_WINE_PFX), str(pfx)], check=True)
+    emu_dir = BASE_EMU_DIR.parent / f"fightcade-emu-replay-{worker_id}"
+    if BASE_EMU_DIR.is_dir() and not emu_dir.is_dir():
+        print(f"[worker {worker_id}] cloning {emu_dir}")
+        subprocess.run(["cp", "-a", str(BASE_EMU_DIR), str(emu_dir)], check=True)
     for cid, length in ids:
         if _shutdown.is_set():
             break
-        capture_one(cid, game, pfx, length)
+        capture_one(cid, game, pfx, emu_dir, length)
 
 
 # ── main ─────────────────────────────────────────────────────────────
