@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert the bulk replay JSON into the ids_file format recorder.py expects.
 
-Outputs lines: <quarkid> <duration_seconds>
+Outputs lines: <quarkid> <duration_seconds> [replay_file]
 """
 
 import argparse
@@ -23,7 +23,11 @@ def main():
             continue
         qid = entry["quarkid"]
         dur = int(entry["duration"])
-        lines.append(f"{qid} {dur}")
+        rf = entry.get("replay_file", "")
+        parts = [qid, str(dur)]
+        if rf:
+            parts.append(rf)
+        lines.append(" ".join(parts))
 
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stderr.write(f"Wrote {len(lines)} entries\n")
