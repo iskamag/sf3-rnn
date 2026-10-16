@@ -2,8 +2,11 @@
 """Record Fightcade FBNeo replays: video, audio, inputs.
 
 Usage: ./emulator/recorder.py replay_ids.txt [--workers N] [--game sfiii3nr1]
+              [--quark-mode savestate] [--savestate-dir DIR]
 
-replay_ids.txt format: <challenge_id> <length_seconds> per line (comments after #).
+replay_ids.txt format: <challenge_id> <length_seconds> [replay_file] per line
+(comments after #). The optional replay_file column is the .fs filename,
+used when --quark-mode=savestate.
 """
 
 import json, os, re, shutil, signal, subprocess, sys, threading, time
@@ -158,7 +161,9 @@ class CaptureError(Exception):
 
 
 def capture_one(challenge_id: str, game: str, wine_pfx: Path, emu_dir: Path,
-                length: int) -> None:
+                length: int, quark_mode: str = "stream",
+                replay_file: str | None = None,
+                savestate_dir: Path | None = None) -> None:
     out = CAPTURES_DIR / challenge_id
     if (out / "input_log.txt").exists() or (out / "video.raw").exists():
         print(f"SKIP {challenge_id} — already captured"); return
@@ -205,10 +210,26 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path, emu_dir: Path,
         print(f"--- {challenge_id} ({game}) ---")
         prev_audio = _snapshot_audio()
 
-        url = f"quark:stream,{game},{challenge_id}.2,7100"
+        if quark_mode == "savestate":
+            if not replay_file:
+                raise CaptureError("savestate mode requires replay_file")
+            fs_dir = savestate_dir or emu_dir
+            fs_path = fs_dir / replay_file
+            if not fs_path.exists():
+                raise CaptureError(f"savestate not found: {fs_path}")
+            if fs_path.resolve() != (emu_dir / replay_file).resolve():
+                shutil.copy(fs_path, emu_dir / replay_file)
+            emu_args = ["gamescope", "-W", "640", "-H", "480", "-r", "60", "--",
+                        "wine", "fcadefbneo.exe", replay_file, "-lua", "input_log.lua"]
+            print(f"  mode: savestate ({replay_file})")
+        else:
+            url = f"quark:stream,{game},{challenge_id}.2,7100"
+            emu_args = ["gamescope", "-W", "640", "-H", "480", "-r", "60", "--",
+                        "wine", "fcadefbneo.exe", url, "-lua", "input_log.lua"]
+            print(f"  mode: stream")
+
         emu = subprocess.Popen(
-            ["gamescope", "-W", "640", "-H", "480", "-r", "60", "--",
-             "wine", "fcadefbneo.exe", url, "-lua", "input_log.lua"],
+            emu_args,
             cwd=emu_dir, env=env, stdin=subprocess.DEVNULL,
             start_new_session=True, stderr=subprocess.PIPE)
         print(f"  pid: {emu.pid}")
@@ -263,7 +284,9 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path, emu_dir: Path,
 # ── worker ───────────────────────────────────────────────────────────
 
 
-def capture_chunk(worker_id: int, ids: list[tuple[str, int]], game: str) -> None:
+def capture_chunk(worker_id: int, ids: list[tuple[str, int, str | None]],
+                  game: str, quark_mode: str = "stream",
+                  savestate_dir: Path | None = None) -> None:
     pfx = Path.home() / f".fightcade-wine-replay-{worker_id}"
     if BASE_WINE_PFX.is_dir() and not (pfx / "drive_c").is_dir():
         print(f"[worker {worker_id}] cloning {pfx}")
@@ -272,10 +295,12 @@ def capture_chunk(worker_id: int, ids: list[tuple[str, int]], game: str) -> None
     if BASE_EMU_DIR.is_dir() and not emu_dir.is_dir():
         print(f"[worker {worker_id}] cloning {emu_dir}")
         subprocess.run(["cp", "-a", str(BASE_EMU_DIR), str(emu_dir)], check=True)
-    for cid, length in ids:
+    for cid, length, replay_file in ids:
         if _shutdown.is_set():
             break
-        capture_one(cid, game, pfx, emu_dir, length)
+        capture_one(cid, game, pfx, emu_dir, length,
+                    quark_mode=quark_mode, replay_file=replay_file,
+                    savestate_dir=savestate_dir)
 
 
 # ── main ─────────────────────────────────────────────────────────────
@@ -286,6 +311,11 @@ def main():
     p = argparse.ArgumentParser(description="Record Fightcade FBNeo replays")
     p.add_argument("ids_file"); p.add_argument("--workers", "-w", type=int, default=4)
     p.add_argument("--game", "-g", default="sfiii3nr1")
+    p.add_argument("--quark-mode", "-m", choices=["stream", "savestate"],
+                   default="stream",
+                   help="stream (quark:stream) or savestate (local .fs file)")
+    p.add_argument("--savestate-dir", type=Path, default=None,
+                   help="Directory containing .fs replay files (for --quark-mode savestate)")
     args = p.parse_args()
 
     ids = []
@@ -306,21 +336,23 @@ def main():
                 print(f"SKIP {line!r} — non-positive length"); continue
             if (CAPTURES_DIR / cid / "input_log.txt").exists():
                 print(f"SKIP {cid} (already captured)"); continue
-            ids.append((cid, length))
+            replay_file = parts[2] if len(parts) >= 3 else None
+            ids.append((cid, length, replay_file))
     if not ids:
         print("No replays to capture."); return
 
     nw = min(args.workers, len(ids))
     chunks = [[] for _ in range(nw)]
-    for i, (cid, length) in enumerate(ids):
-        chunks[i % nw].append((cid, length))
+    for i, (cid, length, replay_file) in enumerate(ids):
+        chunks[i % nw].append((cid, length, replay_file))
     print(f"=== {len(ids)} replays  ->  {nw} workers ===")
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda s, f: _shutdown.set())
 
     with ThreadPoolExecutor(nw) as pool:
-        futures = {pool.submit(capture_chunk, w, c, args.game): w
+        futures = {pool.submit(capture_chunk, w, c, args.game,
+                              args.quark_mode, args.savestate_dir): w
                    for w, c in enumerate(chunks)}
         failed = 0
         for fut in as_completed(futures):
