@@ -43,6 +43,16 @@ def _parse_gamescope_stderr(stderr) -> tuple[str | None, str | None]:
     return video, display
 
 
+def _drain_stderr(stderr):
+    """Keep reading stderr so the pipe buffer doesn't fill up and stall the child."""
+    try:
+        for raw in stderr:
+            line = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+            sys.stdout.write(line); sys.stdout.flush()
+    except ValueError:
+        pass
+
+
 # ── fullscreen ───────────────────────────────────────────────────────
 
 
@@ -207,6 +217,7 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path, emu_dir: Path,
         if not video_node:
             raise CaptureError("no video node")
         print(f"  video: {video_node}  display: {x11}")
+        threading.Thread(target=_drain_stderr, args=(emu.stderr,), daemon=True).start()
 
         for _ in range(90):
             if _shutdown.is_set():
