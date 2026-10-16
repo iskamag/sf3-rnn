@@ -226,7 +226,7 @@ def capture_one(challenge_id: str, game: str, wine_pfx: Path, emu_dir: Path,
             url = f"quark:stream,{game},{challenge_id}.2,7100"
             emu_args = ["gamescope", "-W", "640", "-H", "480", "-r", "60", "--",
                         "wine", "fcadefbneo.exe", url, "-lua", "input_log.lua"]
-            print(f"  mode: stream")
+            print("  mode: stream")
 
         emu = subprocess.Popen(
             emu_args,
