@@ -22,6 +22,7 @@ class DelayedAction:
     buttons: torch.Tensor             # (6,) binary
     log_prob: torch.Tensor            # scalar
     value: torch.Tensor               # scalar
+    payload: object = None            # opaque decision-time context
 
 
 class OutputDelayBuffer:
@@ -30,12 +31,18 @@ class OutputDelayBuffer:
         self._queue: deque[DelayedAction] = deque(maxlen=motor_lag + 1)
 
     def push(self, movement: int, buttons: torch.Tensor,
-             log_prob: torch.Tensor, value: torch.Tensor) -> Optional[DelayedAction]:
+             log_prob: torch.Tensor, value: torch.Tensor,
+             payload: object = None) -> Optional[DelayedAction]:
         """Push a fresh prediction.  Returns the stale action ready to execute
-        (or *None* while the pipeline is priming)."""
+        (or *None* while the pipeline is priming).
+
+        *payload* rides along untouched — callers keep the decision context
+        (e.g. the observation the action was based on) attached to the action
+        until it executes.
+        """
         self._queue.append(
             DelayedAction(movement=movement, buttons=buttons,
-                          log_prob=log_prob, value=value))
+                          log_prob=log_prob, value=value, payload=payload))
         if len(self._queue) > self.motor_lag:
             return self._queue.popleft()
         return None

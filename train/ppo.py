@@ -150,10 +150,20 @@ class PPOTrainer:
             elif self.cfg.use_audio:
                 audio_feats = torch.zeros(self.cfg.audio_feat_dim, device=self.device)
 
-            mov_int, btn_mask, logp, val = self.agent.act(flow_t, audio=audio_feats)
+            decision = self.agent.act(flow_t, audio=audio_feats)
 
-            # Motor delay buffer
-            delayed = motor_buf.push(int(mov_int), btn_mask, logp, val)
+            if decision is not None:
+                mov_int, btn_mask, logp, val = decision
+                # The action only executes motor_lag frames from now, so carry
+                # the decision-time observation with it — the stored transition
+                # must pair each action with the obs its log_prob came from.
+                payload = (flow_t.squeeze(0).cpu(),
+                           audio_feats.cpu() if audio_feats is not None else None)
+                delayed = motor_buf.push(int(mov_int), btn_mask, logp, val,
+                                         payload=payload)
+            else:
+                delayed = None
+
             if delayed is not None:
                 action = np.concatenate(
                     [[delayed.movement], delayed.buttons.numpy().astype(np.int64)])
@@ -164,11 +174,12 @@ class PPOTrainer:
             done = terminated or truncated
             collected += 1
 
-            # Only store when motor buffer is primed (action was actually executed)
+            # Only store once the action has actually been executed.
             if delayed is not None:
+                dec_flow, dec_audio = delayed.payload
                 cur_traj.append(Transition(
-                    flow=flow_t.squeeze(0).cpu(),
-                    audio=audio_feats.cpu() if audio_feats is not None else None,
+                    flow=dec_flow,
+                    audio=dec_audio,
                     movement=delayed.movement,
                     buttons=delayed.buttons.cpu(),
                     log_prob=delayed.log_prob.item(),

@@ -69,7 +69,9 @@ class SF3Agent(nn.Module):
     def act(self,
             flow: torch.Tensor,
             audio: Optional[torch.Tensor] = None,
-            ) -> tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]:
+            ) -> Optional[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Return the next cached sub-action, or *None* while the stride buffer
+        is still priming (fewer than N frames accumulated)."""
         self._flow_buf.append(flow.squeeze().cpu())
         if audio is not None:
             self._audio_buf.append(audio.squeeze().cpu())
@@ -83,8 +85,7 @@ class SF3Agent(nn.Module):
             return (int(a["mov_int"].item()), a["btn_mask"],
                     a["log_prob"], a["value"])
 
-        return (0, torch.zeros(6, dtype=torch.float32),
-                torch.tensor(0.0), torch.tensor(0.0))
+        return None
 
     def _forward(self):
         N = self.N
